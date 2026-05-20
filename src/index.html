@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family Documents</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           var(--hub-bg, #f9fafb);
+      --card:         var(--hub-surface, #ffffff);
+      --border:       var(--hub-border, #e5e7eb);
+      --border-mid:   var(--hub-border, #d1d5db);
+      --text:         var(--hub-text, #111827);
+      --muted:        var(--hub-text-muted, #6b7280);
+      --accent:       var(--hub-primary, #111827);
+      --accent-hover: var(--hub-primary-hover, #374151);
+      --radius:       var(--hub-radius, 0.5rem);
+      --shadow:       0 1px 3px rgba(0,0,0,.07);
+      --shadow-md:    0 4px 12px rgba(0,0,0,.1);
+      --red: #dc2626; --red-light: #fee2e2;
+      --amber: #d97706; --amber-light: #fef3c7;
+      --green: #059669;
+    }
+
+    body {
+      font-family: var(--hub-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; font-size: 15px; line-height: 1.5;
+    }
+
+    .layout { display: flex; height: 100vh; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 220px; flex-shrink: 0;
+      background: var(--card); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 14px 16px 10px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .sidebar-header h2 { font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .folder-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .folder-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px; cursor: pointer; font-size: 0.875rem;
+      transition: background .12s; user-select: none;
+    }
+    .folder-item:hover { background: var(--bg); }
+    .folder-item.active { background: var(--bg); font-weight: 600; color: var(--accent); }
+    .folder-icon { font-size: 1rem; flex-shrink: 0; }
+    .folder-name { flex: 1; truncate: true; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .folder-lock { font-size: 0.7rem; color: var(--amber); flex-shrink: 0; }
+    .folder-count { font-size: 0.7rem; color: var(--muted); flex-shrink: 0; }
+
+    /* ── Main area ── */
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .main-header {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .main-header h1 { font-size: 1.1rem; font-weight: 700; flex: 1; }
+    .files-grid {
+      flex: 1; overflow-y: auto; padding: 16px 20px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px;
+      align-content: start;
+    }
+
+    /* ── File card ── */
+    .file-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+      cursor: pointer; transition: box-shadow .15s, border-color .15s;
+      position: relative;
+    }
+    .file-card:hover { box-shadow: var(--shadow-md); border-color: var(--border-mid); }
+    .file-thumb {
+      height: 100px; border-radius: 4px; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--bg); font-size: 2.5rem;
+    }
+    .file-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .file-name { font-size: 0.78rem; font-weight: 600; line-height: 1.3; word-break: break-word; }
+    .file-meta { font-size: 0.7rem; color: var(--muted); }
+    .file-del {
+      position: absolute; top: 6px; right: 6px; opacity: 0;
+      background: var(--red); color: #fff; border: none; border-radius: 4px;
+      padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
+    }
+    .file-card:hover .file-del { opacity: 1; }
+
+    /* ── Upload zone ── */
+    .drop-zone {
+      border: 2px dashed var(--border-mid); border-radius: var(--radius);
+      padding: 32px; text-align: center; cursor: pointer;
+      transition: border-color .15s, background .15s;
+      color: var(--muted); font-size: 0.875rem;
+      grid-column: 1 / -1;
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--accent); background: var(--bg);
+    }
+    .drop-zone .drop-icon { font-size: 2rem; margin-bottom: 8px; }
+
+    /* ── Progress ── */
+    .upload-progress {
+      grid-column: 1 / -1; background: var(--card);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 12px 16px;
+    }
+    .progress-bar-wrap { height: 6px; background: var(--bg); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+    .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width .1s; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 8px; font-size: 0.875rem;
+      font-weight: 600; cursor: pointer; border: none; transition: opacity .15s, background .15s;
+    }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn-primary { background: var(--accent); color: var(--hub-primary-fg, #fff); }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-ghost { background: transparent; color: var(--muted); border: 1.5px solid var(--border-mid); }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .btn-sm { padding: 4px 10px; font-size: 0.8rem; }
+    .btn-icon { padding: 6px; background: transparent; border: none; cursor: pointer; color: var(--muted); font-size: 1rem; }
+    .btn-icon:hover { color: var(--text); }
+
+    /* ── Modal ── */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100; padding: 20px;
+    }
+    .modal {
+      background: var(--card); border-radius: var(--radius);
+      width: 100%; max-width: 480px; padding: 24px; max-height: 90vh; overflow-y: auto;
+    }
+    .modal h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: 16px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+    .form-group input, .form-group select {
+      width: 100%; border: 1.5px solid var(--border-mid); border-radius: 8px;
+      padding: 8px 12px; font-size: 0.9rem; outline: none; font-family: inherit;
+      transition: border-color .15s;
+    }
+    .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+    .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+    .modal-actions .btn { flex: 1; justify-content: center; }
+
+    /* ── Preview modal ── */
+    .preview-modal {
+      max-width: 90vw; max-height: 90vh; width: 860px;
+      display: flex; flex-direction: column; padding: 0; overflow: hidden;
+    }
+    .preview-header {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px;
+    }
+    .preview-header h3 { flex: 1; font-size: 0.95rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .preview-body { flex: 1; overflow: auto; min-height: 300px; background: #1e293b; display: flex; align-items: center; justify-content: center; }
+    .preview-body img { max-width: 100%; max-height: 70vh; object-fit: contain; }
+    .preview-body embed { width: 100%; height: 70vh; border: none; }
+    .preview-body .no-preview { color: #94a3b8; font-size: 0.9rem; text-align: center; padding: 40px; }
+
+    /* ── Empty ── */
+    .empty { grid-column: 1 / -1; text-align: center; padding: 48px 20px; color: var(--muted); }
+    .empty-icon { font-size: 3rem; margin-bottom: 12px; }
+
+    /* ── Error ── */
+    .error-msg { background: var(--red-light); color: var(--red); border-radius: 8px; padding: 9px 13px; font-size: 0.85rem; }
+
+    /* ── Storage bar ── */
+    .storage-bar { padding: 10px 16px; border-top: 1px solid var(--border); font-size: 0.72rem; color: var(--muted); }
+    .storage-track { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+    .storage-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width .3s; }
+
+    /* ── Responsive ── */
+    @media (max-width: 560px) {
+      .sidebar { width: 56px; }
+      .folder-name, .folder-lock, .folder-count, .sidebar-header h2 { display: none; }
+      .sidebar-header { justify-content: center; }
+      .folder-item { justify-content: center; padding: 10px 8px; }
+      .files-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    }
+  </style>
+<base href="/run/docs/">
+</head>
+<body>
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>Folders</h2>
+      <button class="btn-icon" title="New folder" onclick="openNewFolder()">＋</button>
+    </div>
+    <div class="folder-list" id="folder-list">
+      <div style="padding:16px;color:var(--muted);font-size:.8rem">Loading…</div>
+    </div>
+    <div class="storage-bar" id="storage-bar" style="display:none">
+      <span id="storage-text"></span>
+      <div class="storage-track"><div class="storage-fill" id="storage-fill" style="width:0%"></div></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="main-header">
+      <h1 id="folder-title">Select a folder</h1>
+      <div id="header-actions" style="display:flex;gap:8px"></div>
+    </div>
+    <div class="files-grid" id="files-grid">
+      <div class="empty">
+        <div class="empty-icon">📁</div>
+        <p>Select a folder to view documents</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Hidden file input -->
+<input type="file" id="file-input" style="display:none" />
+
+<script type="module">
+import { memberColor, initial, esc, isAdult, formatRelativeDate } from "/hub-sdk.js";
+import { createFilesHelper } from "/hub-sdk.js";
+import { createDbHelper } from "/hub-sdk.js";
+import { ALLOWED_EXTENSIONS, isImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
+
+// ── Globals ────────────────────────────────────────────────────────────────────
+const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
+const IS_ADULT   = isAdult(HUB_MEMBER);
+
+const db    = createDbHelper(window.__DB_URL ?? "");
+const files = createFilesHelper(window.__FILES_URL ?? "");
+
+// ── State ──────────────────────────────────────────────────────────────────────
+let folders        = [];
+let currentFolder  = null;
+let currentFiles   = [];
+let storageInfo    = { totalBytes: 0, limit: 0 };
+let uploading      = false;
+
+// ── DB Schema ──────────────────────────────────────────────────────────────────
+async function setupSchema() {
+  await db(`CREATE TABLE IF NOT EXISTS folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'everyone',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`);
+  await db(`CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    folder_id TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+  )`);
+}
+
+// ── Data loading ───────────────────────────────────────────────────────────────
+async function loadFolders() {
+  const { rows } = await db(`
+    SELECT f.*, COUNT(d.id) AS doc_count
+    FROM folders f
+    LEFT JOIN documents d ON d.folder_id = f.id
+    GROUP BY f.id ORDER BY f.name
+  `);
+  folders = IS_ADULT
+    ? rows
+    : rows.filter(r => r.visibility === "everyone");
+}
+
+async function loadFiles(folderId) {
+  const { rows } = await db(
+    `SELECT * FROM documents WHERE folder_id = ? ORDER BY uploaded_at DESC`,
+    [folderId]
+  );
+  currentFiles = rows;
+  const info = await files.list();
+  storageInfo = info;
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────────
+async function createFolder(name, visibility) {
+  const id  = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await db(`INSERT INTO folders (id, name, visibility, created_by, created_at) VALUES (?,?,?,?,?)`,
+    [id, name.trim(), visibility, HUB_MEMBER?.id ?? "unknown", now]);
+  await loadFolders();
+  renderSidebar();
+  selectFolder(id);
+}
+
+async function deleteFolder(id) {
+  if (!confirm("Delete this folder and all its documents? This cannot be undone.")) return;
+  // Delete all files in folder
+  const { rows } = await db(`SELECT file_key FROM documents WHERE folder_id = ?`, [id]);
+  for (const r of rows) await files.delete(r.file_key);
+  await db(`DELETE FROM documents WHERE folder_id = ?`, [id]);
+  await db(`DELETE FROM folders WHERE id = ?`, [id]);
+  if (currentFolder?.id === id) {
+    currentFolder = null;
+    currentFiles  = [];
+    renderMain();
+  }
+  await loadFolders();
+  renderSidebar();
+}
+
+async function uploadFile(file) {
+  if (!currentFolder) return;
+  uploading = true;
+  renderMain();
+
+  try {
+    let pct = 0;
+    const result = await files.upload(file, (e) => {
+      if (e.lengthComputable) {
+        pct = Math.round((e.loaded / e.total) * 100);
+        const bar = document.getElementById("upload-progress-bar");
+        if (bar) bar.style.width = `${pct}%`;
+        const label = document.getElementById("upload-progress-label");
+        if (label) label.textContent = `Uploading ${file.name}… ${pct}%`;
+      }
+    });
+
+    // Store document reference in app DB
+    await db(`INSERT INTO documents (id, folder_id, file_key, filename, mime_type, size_bytes, uploaded_by, uploaded_at)
+              VALUES (?,?,?,?,?,?,?,?)`,
+      [crypto.randomUUID(), currentFolder.id, result.id, file.name,
+       file.type, file.size, HUB_MEMBER?.id ?? "unknown", new Date().toISOString()]);
+
+    await loadFiles(currentFolder.id);
+    await loadFolders();
+    renderSidebar();
+  } catch (err) {
+    alert(err.message ?? "Upload failed");
+  } finally {
+    uploading = false;
+    renderMain();
+  }
+}
+
+async function deleteDocument(doc) {
+  if (!confirm(`Delete "${doc.filename}"?`)) return;
+  await files.delete(doc.file_key);
+  await db(`DELETE FROM documents WHERE id = ?`, [doc.id]);
+  await loadFiles(currentFolder.id);
+  await loadFolders();
+  renderSidebar();
+  renderMain();
+}
+
+function selectFolder(id) {
+  currentFolder = folders.find(f => f.id === id) ?? null;
+  if (currentFolder) loadFiles(currentFolder.id).then(renderMain);
+  renderSidebar();
+  renderMain();
+}
+
+// ── Render sidebar ─────────────────────────────────────────────────────────────
+function renderSidebar() {
+  const list = document.getElementById("folder-list");
+  if (folders.length === 0) {
+    list.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:.8rem">No folders yet</div>`;
+  } else {
+    list.innerHTML = folders.map(f => `
+      <div class="folder-item ${currentFolder?.id === f.id ? "active" : ""}" onclick="selectFolder('${f.id}')">
+        <span class="folder-icon">📁</span>
+        <span class="folder-name">${esc(f.name)}</span>
+        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">🔒</span>` : ""}
+        <span class="folder-count">${f.doc_count ?? 0}</span>
+      </div>`).join("");
+  }
+
+  // Storage bar
+  if (storageInfo.limit > 0) {
+    const bar = document.getElementById("storage-bar");
+    bar.style.display = "block";
+    document.getElementById("storage-text").textContent =
+      `${formatBytes(storageInfo.totalBytes)} / ${formatBytes(storageInfo.limit)}`;
+    document.getElementById("storage-fill").style.width =
+      `${Math.min(100, (storageInfo.totalBytes / storageInfo.limit) * 100).toFixed(1)}%`;
+  }
+}
+
+// ── Render main area ───────────────────────────────────────────────────────────
+function renderMain() {
+  const title   = document.getElementById("folder-title");
+  const actions = document.getElementById("header-actions");
+  const grid    = document.getElementById("files-grid");
+
+  if (!currentFolder) {
+    title.textContent = "Family Documents";
+    actions.innerHTML = "";
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">📁</div><p>Select a folder to view documents</p></div>`;
+    return;
+  }
+
+  const lockBadge = currentFolder.visibility === "adults"
+    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">Adults only 🔒</span>`
+    : "";
+  title.innerHTML = esc(currentFolder.name) + lockBadge;
+
+  actions.innerHTML = `
+    ${IS_ADULT ? `<button class="btn btn-ghost btn-sm" onclick="openRenameFolder()">Rename</button>` : ""}
+    ${IS_ADULT ? `<button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteFolderCurrent()">Delete folder</button>` : ""}
+    <button class="btn btn-primary btn-sm" onclick="triggerUpload()">↑ Upload</button>
+  `;
+
+  if (uploading) {
+    grid.innerHTML = `
+      <div class="upload-progress">
+        <div id="upload-progress-label" style="font-size:.85rem;color:var(--muted)">Uploading…</div>
+        <div class="progress-bar-wrap"><div class="progress-bar" id="upload-progress-bar" style="width:0%"></div></div>
+      </div>`;
+    return;
+  }
+
+  const dropZone = `
+    <div class="drop-zone" id="drop-zone"
+      ondragover="event.preventDefault();this.classList.add('drag-over')"
+      ondragleave="this.classList.remove('drag-over')"
+      ondrop="handleDrop(event)">
+      <div class="drop-icon">📎</div>
+      <strong>Drop files here</strong> or <a href="#" onclick="event.preventDefault();triggerUpload()" style="color:var(--accent)">browse</a>
+      <div style="margin-top:6px;font-size:.75rem;color:var(--muted)">
+        PDF, images, Word, Excel, text · max ${formatBytes(window.__RESOURCE_LIMITS?.max_file_bytes ?? 10485760)}
+      </div>
+    </div>`;
+
+  if (currentFiles.length === 0) {
+    grid.innerHTML = dropZone;
+    return;
+  }
+
+  const cards = currentFiles.map(doc => {
+    const thumb = isImage(doc.mime_type)
+      ? `<img src="${files.url(doc.file_key)}" loading="lazy" onerror="this.parentElement.innerHTML='${fileIcon(doc.mime_type)}'" />`
+      : fileIcon(doc.mime_type);
+    return `
+      <div class="file-card" onclick="previewDoc('${doc.id}')">
+        <button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete">✕</button>
+        <div class="file-thumb">${isImage(doc.mime_type) ? `<img src="${files.url(doc.file_key)}" loading="lazy" />` : `<span>${fileIcon(doc.mime_type)}</span>`}</div>
+        <div class="file-name" title="${esc(doc.filename)}">${esc(doc.filename)}</div>
+        <div class="file-meta">${formatBytes(doc.size_bytes)} · ${formatRelativeDate(doc.uploaded_at)}</div>
+      </div>`;
+  }).join("");
+
+  grid.innerHTML = dropZone + cards;
+}
+
+// ── Window actions ─────────────────────────────────────────────────────────────
+window.selectFolder = selectFolder;
+
+window.deleteFolderCurrent = () => currentFolder && deleteFolder(currentFolder.id);
+
+window.deleteDoc = (id) => {
+  const doc = currentFiles.find(d => d.id === id);
+  if (doc) deleteDocument(doc);
+};
+
+window.triggerUpload = () => {
+  const input = document.getElementById("file-input");
+  input.accept = accept();
+  input.click();
+};
+
+window.handleDrop = async (e) => {
+  e.preventDefault();
+  document.getElementById("drop-zone")?.classList.remove("drag-over");
+  const f = e.dataTransfer.files[0];
+  if (f) await uploadFile(f);
+};
+
+window.previewDoc = (id) => {
+  const doc = currentFiles.find(d => d.id === id);
+  if (doc) openPreview(doc);
+};
+
+// ── PDF.js renderer ────────────────────────────────────────────────────────────
+const PDFJS_VERSION = "4.9.155";
+const PDFJS_CDN     = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/build`;
+
+let _pdfjsLib = null;
+async function getPdfjs() {
+  if (_pdfjsLib) return _pdfjsLib;
+  const { getDocument, GlobalWorkerOptions } = await import(`${PDFJS_CDN}/pdf.min.mjs`);
+  GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.mjs`;
+  _pdfjsLib = { getDocument };
+  return _pdfjsLib;
+}
+
+async function renderPdf(blobUrl, container) {
+  container.style.cssText = "overflow-y:auto;background:#525659;padding:16px;display:flex;flex-direction:column;align-items:center;gap:12px;height:70vh";
+  container.innerHTML = `<p style="color:#ccc;font-size:.85rem">Loading PDF…</p>`;
+
+  try {
+    const { getDocument } = await getPdfjs();
+    const pdf = await getDocument(blobUrl).promise;
+    container.innerHTML = "";
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page    = await pdf.getPage(i);
+      const vp      = page.getViewport({ scale: 1 });
+      const scale   = Math.min(1.5, (container.clientWidth - 32) / vp.width);
+      const viewport = page.getViewport({ scale });
+
+      const canvas  = document.createElement("canvas");
+      canvas.width  = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.cssText = "display:block;box-shadow:0 2px 8px rgba(0,0,0,.4);max-width:100%";
+
+      const label = document.createElement("p");
+      label.textContent = `Page ${i} of ${pdf.numPages}`;
+      label.style.cssText = "color:#aaa;font-size:.72rem;text-align:center;margin-top:-4px";
+
+      container.appendChild(canvas);
+      container.appendChild(label);
+
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    }
+  } catch (err) {
+    container.innerHTML = `<p style="color:#fca5a5;padding:20px">Failed to render PDF: ${err.message}</p>`;
+  }
+}
+
+// ── Fetch file as blob URL (bypasses ad blockers, works for both preview and download) ──
+async function fetchBlobUrl(fileKey) {
+  const res = await fetch(files.url(fileKey));
+  const blob = await res.blob();
+  return { blobUrl: URL.createObjectURL(blob), mimeType: blob.type };
+}
+
+// ── Download ───────────────────────────────────────────────────────────────────
+async function downloadDoc(fileKey, filename) {
+  const { blobUrl } = await fetchBlobUrl(fileKey);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+}
+
+// ── Preview ────────────────────────────────────────────────────────────────────
+async function openPreview(doc) {
+  // Show modal immediately with a loading state, then swap in content
+  const el = document.createElement("div");
+  el.className = "modal-backdrop";
+  el.innerHTML = `
+    <div class="modal preview-modal">
+      <div class="preview-header">
+        <h3>${esc(doc.filename)}</h3>
+        <button id="preview-dl-btn" class="btn btn-ghost btn-sm" title="Download">↓ Download</button>
+        <button class="btn-icon" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+      </div>
+      <div class="preview-body" id="preview-body-inner">
+        <div class="no-preview"><p style="color:#94a3b8">Loading…</p></div>
+      </div>
+    </div>`;
+  el.addEventListener("click", e => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+
+  const bodyEl = el.querySelector("#preview-body-inner");
+  const dlBtn  = el.querySelector("#preview-dl-btn");
+
+  let blobUrl;
+  try {
+    ({ blobUrl } = await fetchBlobUrl(doc.file_key));
+  } catch {
+    bodyEl.innerHTML = `<div class="no-preview"><p style="color:#94a3b8">Failed to load file</p></div>`;
+    return;
+  }
+
+  // Revoke blob URL when modal closes
+  el.addEventListener("remove", () => URL.revokeObjectURL(blobUrl));
+  const origRemove = el.remove.bind(el);
+  el.remove = () => { URL.revokeObjectURL(blobUrl); origRemove(); };
+
+  dlBtn.onclick = () => {
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = doc.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  if (isImage(doc.mime_type)) {
+    bodyEl.innerHTML = `<img src="${blobUrl}" alt="${esc(doc.filename)}" />`;
+  } else if (isPdf(doc.mime_type)) {
+    await renderPdf(blobUrl, bodyEl);
+  } else {
+    bodyEl.innerHTML = `<div class="no-preview">
+      <div style="font-size:3rem;margin-bottom:12px">${fileIcon(doc.mime_type)}</div>
+      <p>No preview available</p>
+    </div>`;
+  }
+}
+
+window.downloadDoc = downloadDoc;
+
+// ── New folder modal ───────────────────────────────────────────────────────────
+window.openNewFolder = function() {
+  if (!IS_ADULT) { alert("Only adults can create folders."); return; }
+  const el = document.createElement("div");
+  el.className = "modal-backdrop";
+  el.innerHTML = `
+    <div class="modal">
+      <h3>New Folder</h3>
+      <div class="form-group">
+        <label>Folder name</label>
+        <input id="new-folder-name" type="text" placeholder="e.g. Medical Records" autofocus />
+      </div>
+      <div class="form-group">
+        <label>Visible to</label>
+        <select id="new-folder-vis">
+          <option value="everyone">Everyone</option>
+          <option value="adults">Adults only 🔒</option>
+        </select>
+      </div>
+      <div id="new-folder-err" style="display:none" class="error-msg"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitNewFolder()">Create</button>
+      </div>
+    </div>`;
+  el.addEventListener("click", e => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+  setTimeout(() => document.getElementById("new-folder-name")?.focus(), 50);
+};
+
+window.submitNewFolder = async function() {
+  const name = document.getElementById("new-folder-name")?.value?.trim();
+  const vis  = document.getElementById("new-folder-vis")?.value ?? "everyone";
+  const err  = document.getElementById("new-folder-err");
+  if (!name) { err.textContent = "Please enter a name."; err.style.display = "block"; return; }
+  document.querySelector(".modal-backdrop")?.remove();
+  await createFolder(name, vis);
+};
+
+// ── Rename folder modal ────────────────────────────────────────────────────────
+window.openRenameFolder = function() {
+  if (!currentFolder || !IS_ADULT) return;
+  const f = currentFolder;
+  const el = document.createElement("div");
+  el.className = "modal-backdrop";
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Rename Folder</h3>
+      <div class="form-group">
+        <label>Name</label>
+        <input id="rename-input" type="text" value="${esc(f.name)}" />
+      </div>
+      <div class="form-group">
+        <label>Visible to</label>
+        <select id="rename-vis">
+          <option value="everyone" ${f.visibility === "everyone" ? "selected" : ""}>Everyone</option>
+          <option value="adults"   ${f.visibility === "adults"   ? "selected" : ""}>Adults only 🔒</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitRename()">Save</button>
+      </div>
+    </div>`;
+  el.addEventListener("click", e => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+  setTimeout(() => { const i = document.getElementById("rename-input"); i?.focus(); i?.select(); }, 50);
+};
+
+window.submitRename = async function() {
+  const name = document.getElementById("rename-input")?.value?.trim();
+  const vis  = document.getElementById("rename-vis")?.value ?? "everyone";
+  if (!name || !currentFolder) return;
+  await db(`UPDATE folders SET name = ?, visibility = ? WHERE id = ?`,
+    [name, vis, currentFolder.id]);
+  document.querySelector(".modal-backdrop")?.remove();
+  currentFolder = { ...currentFolder, name, visibility: vis };
+  await loadFolders();
+  renderSidebar();
+  renderMain();
+};
+
+// ── File input handler ─────────────────────────────────────────────────────────
+document.getElementById("file-input").addEventListener("change", async (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = "";
+  if (f) await uploadFile(f);
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+(async () => {
+  if (!window.__DB_URL) {
+    document.getElementById("folder-list").innerHTML =
+      `<div style="padding:16px;color:var(--red);font-size:.8rem">No database — is storage: db set?</div>`;
+    return;
+  }
+  await setupSchema();
+  const info = await files.list();
+  storageInfo = info;
+  await loadFolders();
+  renderSidebar();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "id": "docs",
+  "name": "Family Documents",
+  "version": "1.0.0",
+  "description": "Store and share family documents — receipts, medical records, school papers, insurance policies. Organise into folders with adult-only or family-wide visibility.",
+  "entrypoint": "index.html",
+  "runtime": "static",
+  "storage": "db",
+  "category": "family",
+  "tags": ["documents", "files", "storage", "pdf", "photos"],
+  "publishes": [],
+  "data_access": {
+    "reads": ["family.members"],
+    "writes": []
+  },
+  "permissions": {
+    "default_audience": "everyone",
+    "requires_approval": false
+  },
+  "nav": {
+    "label": "Documents",
+    "icon": "📄"
+  },
+  "cdn_whitelist": ["https://unpkg.com"],
+  "resource_limits": {
+    "max_db_bytes": 10485760,
+    "max_file_bytes": 10485760,
+    "max_files_bytes": 524288000
+  }
+}
