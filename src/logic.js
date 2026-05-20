@@ -18,7 +18,7 @@ export const ALLOWED_EXTENSIONS = {
 };
 
 export function isImage(mimeType) {
-  return mimeType?.startsWith("image/");
+  return mimeType?.startsWith("image/") === true;
 }
 
 export function isPdf(mimeType) {
