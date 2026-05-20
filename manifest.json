@@ -7,10 +7,18 @@
   "runtime": "static",
   "storage": "db",
   "category": "family",
-  "tags": ["documents", "files", "storage", "pdf", "photos"],
+  "tags": [
+    "documents",
+    "files",
+    "storage",
+    "pdf",
+    "photos"
+  ],
   "publishes": [],
   "data_access": {
-    "reads": ["family.members"],
+    "reads": [
+      "family.members"
+    ],
     "writes": []
   },
   "permissions": {
@@ -18,13 +26,15 @@
     "requires_approval": false
   },
   "nav": {
-    "label": "Documents",
-    "icon": "📄"
+    "label": "Documents"
   },
-  "cdn_whitelist": ["https://unpkg.com"],
+  "cdn_whitelist": [
+    "https://unpkg.com"
+  ],
   "resource_limits": {
     "max_db_bytes": 10485760,
     "max_file_bytes": 10485760,
     "max_files_bytes": 524288000
-  }
+  },
+  "icon": "📄"
 }

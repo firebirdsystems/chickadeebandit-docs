@@ -19,12 +19,16 @@ jobs:
         with:
           node-version: 20
 
+      - name: Set version
+        id: version
+        run: |
+          VERSION="1.0.${{ github.run_number }}"
+          jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.tmp.json
+          mv manifest.tmp.json manifest.json
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Build bundle
         run: node build.mjs
-
-      - name: Read version from manifest
-        id: version
-        run: echo "version=$(jq -r .version manifest.json)" >> $GITHUB_OUTPUT
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
