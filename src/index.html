@@ -247,24 +247,8 @@ let uploading      = false;
 
 // ── DB Schema ──────────────────────────────────────────────────────────────────
 async function setupSchema() {
-  await db(`CREATE TABLE IF NOT EXISTS folders (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    visibility TEXT NOT NULL DEFAULT 'everyone',
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  )`);
-  await db(`CREATE TABLE IF NOT EXISTS documents (
-    id TEXT PRIMARY KEY,
-    folder_id TEXT NOT NULL,
-    file_key TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    uploaded_by TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL
-  )`);
-}
+  // Schema managed by hub migrations
+  }
 
 // ── Data loading ───────────────────────────────────────────────────────────────
 async function loadFolders() {
