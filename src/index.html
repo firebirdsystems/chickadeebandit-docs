@@ -226,7 +226,7 @@
 <input type="file" id="file-input" style="display:none" />
 
 <script type="module">
-import { memberColor, initial, esc, isAdult, formatRelativeDate } from "/hub-sdk.js";
+import { memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
 import { createDbHelper } from "/hub-sdk.js";
 import { ALLOWED_EXTENSIONS, isImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
@@ -285,7 +285,7 @@ async function createFolder(name, visibility) {
 }
 
 async function deleteFolder(id) {
-  if (!confirm("Delete this folder and all its documents? This cannot be undone.")) return;
+  if (!await hubConfirm({ message: "Delete this folder?", description: "All documents inside will be permanently removed.", confirmLabel: "Delete folder", destructive: true })) return;
   // Delete all files in folder
   const { rows } = await db(`SELECT file_key FROM documents WHERE folder_id = ?`, [id]);
   for (const r of rows) await files.delete(r.file_key);
@@ -335,7 +335,7 @@ async function uploadFile(file) {
 }
 
 async function deleteDocument(doc) {
-  if (!confirm(`Delete "${doc.filename}"?`)) return;
+  if (!await hubConfirm({ message: `Delete "${doc.filename}"?`, confirmLabel: "Delete", destructive: true })) return;
   await files.delete(doc.file_key);
   await db(`DELETE FROM documents WHERE id = ?`, [doc.id]);
   await loadFiles(currentFolder.id);
