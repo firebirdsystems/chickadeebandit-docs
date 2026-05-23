@@ -256,7 +256,7 @@ async function loadFolders() {
     SELECT f.*, COUNT(d.id) AS doc_count
     FROM folders f
     LEFT JOIN documents d ON d.folder_id = f.id
-    GROUP BY f.id ORDER BY f.name
+    GROUP BY f.id, f.household_id ORDER BY f.name
   `);
   folders = IS_ADULT
     ? rows
@@ -668,6 +668,8 @@ window.submitRename = async function() {
   const name = document.getElementById("rename-input")?.value?.trim();
   const vis  = document.getElementById("rename-vis")?.value ?? "everyone";
   if (!name || !currentFolder) return;
+  const btn = document.querySelector('.modal-actions .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   await db(`UPDATE folders SET name = ?, visibility = ? WHERE id = ?`,
     [name, vis, currentFolder.id]);
   document.querySelector(".modal-backdrop")?.remove();
