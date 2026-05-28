@@ -1,12 +1,12 @@
 {
   "id": "docs",
-  "name": "Family Documents",
+  "name": "Documents",
   "version": "1.0.0",
-  "description": "Store and share family documents — receipts, medical records, school papers, insurance policies. Organise into folders with adult-only or family-wide visibility.",
+  "description": "Store and share documents — receipts, medical records, school papers, insurance policies. Organise into folders with adult-only or organization-wide visibility.",
   "entrypoint": "index.html",
   "runtime": "static",
   "storage": "db",
-  "category": "family",
+  "category": "general",
   "tags": [
     "documents",
     "files",
