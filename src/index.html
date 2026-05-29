@@ -228,74 +228,106 @@
 <script type="module">
 import { memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { createDbHelper } from "/hub-sdk.js";
 import { ALLOWED_EXTENSIONS, isImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
 
 // ── Globals ────────────────────────────────────────────────────────────────────
 const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
 const IS_ADULT   = isAdult(HUB_MEMBER);
 
-const db    = createDbHelper(window.__DB_URL ?? "");
+const DOCS    = window.__DOCS_URL    ?? "";
+const STORE   = window.__STORE_URL   ?? "";
+const CONTEXT = window.__CONTEXT_URL ?? "";
 const files = createFilesHelper(window.__FILES_URL ?? "");
 
 // ── State ──────────────────────────────────────────────────────────────────────
-let folders        = [];
-let currentFolder  = null;
+let folders        = [];   // [{ name, visibility, doc_count }]
+let currentFolder  = null; // { name, visibility }
 let currentFiles   = [];
 let storageInfo    = { totalBytes: 0, limit: 0 };
 let uploading      = false;
+let hubGroups      = [];   // HubMemberGroup[]
 
-// ── DB Schema ──────────────────────────────────────────────────────────────────
-async function setupSchema() {
-  // Schema managed by hub migrations
-  }
+// ── Docs API helpers ───────────────────────────────────────────────────────────
+async function docsGet(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`${DOCS}${qs ? "?" + qs : ""}`);
+  return res.ok ? res.json() : [];
+}
+async function docsCreate(body) {
+  const res = await fetch(DOCS, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return res.json();
+}
+async function docsDelete(id) {
+  await fetch(`${DOCS}/${id}`, { method: "DELETE" });
+}
+
+// Folder metadata stored in app KV as "folders_meta": { [name]: { visibility, createdBy } }
+async function getFoldersMeta() {
+  if (!STORE) return {};
+  const res = await fetch(`${STORE}?key=folders_meta`);
+  if (!res.ok) return {};
+  const { value } = await res.json();
+  return value ? JSON.parse(value) : {};
+}
+async function saveFoldersMeta(meta) {
+  if (!STORE) return;
+  await fetch(STORE, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "folders_meta", value: JSON.stringify(meta) }) });
+}
 
 // ── Data loading ───────────────────────────────────────────────────────────────
 async function loadFolders() {
-  const { rows } = await db(`
-    SELECT f.*, COUNT(d.id) AS doc_count
-    FROM folders f
-    LEFT JOIN documents d ON d.folder_id = f.id
-    GROUP BY f.id, f.household_id ORDER BY f.name
-  `);
-  folders = IS_ADULT
-    ? rows
-    : rows.filter(r => r.visibility === "everyone");
+  const [allDocs, meta] = await Promise.all([docsGet(), getFoldersMeta()]);
+  const docs = Array.isArray(allDocs) ? allDocs : [];
+
+  // Count docs per folder
+  const counts = {};
+  for (const d of docs) if (d.folder) counts[d.folder] = (counts[d.folder] ?? 0) + 1;
+
+  // Build folder list from metadata + any folders that exist only in docs
+  const folderSet = new Set([...Object.keys(meta), ...docs.map(d => d.folder).filter(Boolean)]);
+  const all = [...folderSet].map(name => ({
+    name,
+    visibility: meta[name]?.visibility ?? "everyone",
+    doc_count: counts[name] ?? 0,
+  })).sort((a, b) => a.name.localeCompare(b.name));
+
+  folders = all.filter(f => {
+    if (f.visibility === "everyone") return true;
+    if (f.visibility === "adults") return IS_ADULT;
+    const group = hubGroups.find(g => g.id === f.visibility);
+    return group ? group.memberIds.includes(HUB_MEMBER?.id) : IS_ADULT;
+  });
 }
 
-async function loadFiles(folderId) {
-  const { rows } = await db(
-    `SELECT * FROM documents WHERE folder_id = ? ORDER BY uploaded_at DESC`,
-    [folderId]
-  );
-  currentFiles = rows;
+async function loadFiles(folderName) {
+  const docs = await docsGet({ folder: folderName });
+  currentFiles = Array.isArray(docs) ? docs : [];
   const info = await files.list();
   storageInfo = info;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────────
 async function createFolder(name, visibility) {
-  const id  = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await db(`INSERT INTO folders (id, name, visibility, created_by, created_at) VALUES (?,?,?,?,?)`,
-    [id, name.trim(), visibility, HUB_MEMBER?.id ?? "unknown", now]);
+  const meta = await getFoldersMeta();
+  meta[name.trim()] = { visibility, createdBy: HUB_MEMBER?.id ?? "unknown", createdAt: new Date().toISOString() };
+  await saveFoldersMeta(meta);
   await loadFolders();
   renderSidebar();
-  selectFolder(id);
+  selectFolder(name.trim());
 }
 
-async function deleteFolder(id) {
+async function deleteFolder(name) {
   if (!await hubConfirm({ message: "Delete this folder?", description: "All documents inside will be permanently removed.", confirmLabel: "Delete folder", destructive: true })) return;
-  // Delete all files in folder
-  const { rows } = await db(`SELECT file_key FROM documents WHERE folder_id = ?`, [id]);
-  for (const r of rows) await files.delete(r.file_key);
-  await db(`DELETE FROM documents WHERE folder_id = ?`, [id]);
-  await db(`DELETE FROM folders WHERE id = ?`, [id]);
-  if (currentFolder?.id === id) {
-    currentFolder = null;
-    currentFiles  = [];
-    renderMain();
+  const docs = await docsGet({ folder: name });
+  for (const d of (Array.isArray(docs) ? docs : [])) {
+    await docsDelete(d.id);
+    if (d.fileKey) await files.delete(d.fileKey).catch(() => {});
   }
+  const meta = await getFoldersMeta();
+  delete meta[name];
+  await saveFoldersMeta(meta);
+  if (currentFolder?.name === name) { currentFolder = null; currentFiles = []; renderMain(); }
   await loadFolders();
   renderSidebar();
 }
@@ -317,13 +349,19 @@ async function uploadFile(file) {
       }
     });
 
-    // Store document reference in app DB
-    await db(`INSERT INTO documents (id, folder_id, file_key, filename, mime_type, size_bytes, uploaded_by, uploaded_at)
-              VALUES (?,?,?,?,?,?,?,?)`,
-      [crypto.randomUUID(), currentFolder.id, result.id, file.name,
-       file.type, file.size, HUB_MEMBER?.id ?? "unknown", new Date().toISOString()]);
+    // Register document in hub documents table
+    const sharedWith = currentFolder.visibility === "everyone" ? ["everyone"] : [];
+    await docsCreate({
+      title: file.name,
+      category: "other",
+      fileKey: result.id,
+      mimeType: file.type,
+      sizeBytes: file.size,
+      sharedWith,
+      folder: currentFolder.name,
+    });
 
-    await loadFiles(currentFolder.id);
+    await loadFiles(currentFolder.name);
     await loadFolders();
     renderSidebar();
   } catch (err) {
@@ -335,18 +373,18 @@ async function uploadFile(file) {
 }
 
 async function deleteDocument(doc) {
-  if (!await hubConfirm({ message: `Delete "${doc.filename}"?`, confirmLabel: "Delete", destructive: true })) return;
-  await files.delete(doc.file_key);
-  await db(`DELETE FROM documents WHERE id = ?`, [doc.id]);
-  await loadFiles(currentFolder.id);
+  if (!await hubConfirm({ message: `Delete "${doc.title}"?`, confirmLabel: "Delete", destructive: true })) return;
+  await docsDelete(doc.id);
+  if (doc.fileKey) await files.delete(doc.fileKey).catch(() => {});
+  await loadFiles(currentFolder.name);
   await loadFolders();
   renderSidebar();
   renderMain();
 }
 
-function selectFolder(id) {
-  currentFolder = folders.find(f => f.id === id) ?? null;
-  if (currentFolder) loadFiles(currentFolder.id).then(renderMain);
+function selectFolder(name) {
+  currentFolder = folders.find(f => f.name === name) ?? null;
+  if (currentFolder) loadFiles(currentFolder.name).then(renderMain);
   renderSidebar();
   renderMain();
 }
@@ -358,10 +396,11 @@ function renderSidebar() {
     list.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:.8rem">No folders yet</div>`;
   } else {
     list.innerHTML = folders.map(f => `
-      <div class="folder-item ${currentFolder?.id === f.id ? "active" : ""}" onclick="selectFolder('${f.id}')">
+      <div class="folder-item ${currentFolder?.name === f.name ? "active" : ""}" onclick="selectFolder('${esc(f.name)}')">
         <span class="folder-icon">📁</span>
         <span class="folder-name">${esc(f.name)}</span>
-        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">🔒</span>` : ""}
+        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">🔒</span>`
+          : (() => { const g = hubGroups.find(hg => hg.id === f.visibility); return g ? `<span class="folder-lock" title="Group: ${esc(g.name)}">👥</span>` : ""; })()}
         <span class="folder-count">${f.doc_count ?? 0}</span>
       </div>`).join("");
   }
@@ -390,8 +429,11 @@ function renderMain() {
     return;
   }
 
+  const _folderGroup = hubGroups.find(g => g.id === currentFolder.visibility);
   const lockBadge = currentFolder.visibility === "adults"
     ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">Adults only 🔒</span>`
+    : _folderGroup
+    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">👥 ${esc(_folderGroup.name)}</span>`
     : "";
   title.innerHTML = esc(currentFolder.name) + lockBadge;
 
@@ -428,15 +470,12 @@ function renderMain() {
   }
 
   const cards = currentFiles.map(doc => {
-    const thumb = isImage(doc.mime_type)
-      ? `<img src="${files.url(doc.file_key)}" loading="lazy" onerror="this.parentElement.innerHTML='${fileIcon(doc.mime_type)}'" />`
-      : fileIcon(doc.mime_type);
     return `
       <div class="file-card" onclick="previewDoc('${doc.id}')">
         <button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete">✕</button>
-        <div class="file-thumb">${isImage(doc.mime_type) ? `<img src="${files.url(doc.file_key)}" loading="lazy" />` : `<span>${fileIcon(doc.mime_type)}</span>`}</div>
-        <div class="file-name" title="${esc(doc.filename)}">${esc(doc.filename)}</div>
-        <div class="file-meta">${formatBytes(doc.size_bytes)} · ${formatRelativeDate(doc.uploaded_at)}</div>
+        <div class="file-thumb">${isImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${fileIcon(doc.mimeType)}</span>`}</div>
+        <div class="file-name" title="${esc(doc.title)}">${esc(doc.title)}</div>
+        <div class="file-meta">${formatBytes(doc.sizeBytes ?? 0)} · ${formatRelativeDate(doc.createdAt)}</div>
       </div>`;
   }).join("");
 
@@ -446,7 +485,7 @@ function renderMain() {
 // ── Window actions ─────────────────────────────────────────────────────────────
 window.selectFolder = selectFolder;
 
-window.deleteFolderCurrent = () => currentFolder && deleteFolder(currentFolder.id);
+window.deleteFolderCurrent = () => currentFolder && deleteFolder(currentFolder.name);
 
 window.deleteDoc = (id) => {
   const doc = currentFiles.find(d => d.id === id);
@@ -545,7 +584,7 @@ async function openPreview(doc) {
   el.innerHTML = `
     <div class="modal preview-modal">
       <div class="preview-header">
-        <h3>${esc(doc.filename)}</h3>
+        <h3>${esc(doc.title)}</h3>
         <button id="preview-dl-btn" class="btn btn-ghost btn-sm" title="Download">↓ Download</button>
         <button class="btn-icon" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
@@ -561,7 +600,7 @@ async function openPreview(doc) {
 
   let blobUrl;
   try {
-    ({ blobUrl } = await fetchBlobUrl(doc.file_key));
+    ({ blobUrl } = await fetchBlobUrl(doc.fileKey));
   } catch {
     bodyEl.innerHTML = `<div class="no-preview"><p style="color:#94a3b8">Failed to load file</p></div>`;
     return;
@@ -575,19 +614,19 @@ async function openPreview(doc) {
   dlBtn.onclick = () => {
     const a = document.createElement("a");
     a.href = blobUrl;
-    a.download = doc.filename;
+    a.download = doc.title;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
-  if (isImage(doc.mime_type)) {
-    bodyEl.innerHTML = `<img src="${blobUrl}" alt="${esc(doc.filename)}" />`;
-  } else if (isPdf(doc.mime_type)) {
+  if (isImage(doc.mimeType)) {
+    bodyEl.innerHTML = `<img src="${blobUrl}" alt="${esc(doc.title)}" />`;
+  } else if (isPdf(doc.mimeType)) {
     await renderPdf(blobUrl, bodyEl);
   } else {
     bodyEl.innerHTML = `<div class="no-preview">
-      <div style="font-size:3rem;margin-bottom:12px">${fileIcon(doc.mime_type)}</div>
+      <div style="font-size:3rem;margin-bottom:12px">${fileIcon(doc.mimeType)}</div>
       <p>No preview available</p>
     </div>`;
   }
@@ -612,6 +651,7 @@ window.openNewFolder = function() {
         <select id="new-folder-vis">
           <option value="everyone">Everyone</option>
           <option value="adults">Adults only 🔒</option>
+          ${hubGroups.map(g => `<option value="${esc(g.id)}">👥 ${esc(g.name)}</option>`).join("")}
         </select>
       </div>
       <div id="new-folder-err" style="display:none" class="error-msg"></div>
@@ -652,6 +692,7 @@ window.openRenameFolder = function() {
         <select id="rename-vis">
           <option value="everyone" ${f.visibility === "everyone" ? "selected" : ""}>Everyone</option>
           <option value="adults"   ${f.visibility === "adults"   ? "selected" : ""}>Adults only 🔒</option>
+          ${hubGroups.map(g => `<option value="${esc(g.id)}" ${f.visibility === g.id ? "selected" : ""}>👥 ${esc(g.name)}</option>`).join("")}
         </select>
       </div>
       <div class="modal-actions">
@@ -670,8 +711,19 @@ window.submitRename = async function() {
   if (!name || !currentFolder) return;
   const btn = document.querySelector('.modal-actions .btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-  await db(`UPDATE folders SET name = ?, visibility = ? WHERE id = ?`,
-    [name, vis, currentFolder.id]);
+  const meta = await getFoldersMeta();
+  // Move docs to new folder name if it changed
+  if (name !== currentFolder.name) {
+    const docs = await docsGet({ folder: currentFolder.name });
+    for (const d of (Array.isArray(docs) ? docs : [])) {
+      await fetch(`${DOCS}/${d.id}`, { method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder: name }) });
+    }
+    delete meta[currentFolder.name];
+  }
+  meta[name] = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
+  await saveFoldersMeta(meta);
   document.querySelector(".modal-backdrop")?.remove();
   currentFolder = { ...currentFolder, name, visibility: vis };
   await loadFolders();
@@ -688,13 +740,17 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 (async () => {
-  if (!window.__DB_URL) {
+  if (!DOCS) {
     document.getElementById("folder-list").innerHTML =
-      `<div style="padding:16px;color:var(--red);font-size:.8rem">No database — is storage: db set?</div>`;
+      `<div style="padding:16px;color:var(--red);font-size:.8rem">Documents not available</div>`;
     return;
   }
-  await setupSchema();
-  const info = await files.list();
+  const [info] = await Promise.all([
+    files.list(),
+    CONTEXT
+      ? fetch(`${CONTEXT}?keys=family.groups`).then(r => r.ok ? r.json() : {}).then(d => { hubGroups = d["family.groups"] ?? []; })
+      : Promise.resolve(),
+  ]);
   storageInfo = info;
   await loadFolders();
   renderSidebar();

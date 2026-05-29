@@ -1,11 +1,11 @@
 {
   "id": "docs",
   "name": "Documents",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Store and share documents — receipts, medical records, school papers, insurance policies. Organise into folders with adult-only or organization-wide visibility.",
   "entrypoint": "index.html",
   "runtime": "static",
-  "storage": "db",
+  "storage": "none",
   "category": "general",
   "tags": [
     "documents",
@@ -17,7 +17,8 @@
   "publishes": [],
   "data_access": {
     "reads": [
-      "family.members"
+      "family.members",
+      "family.groups"
     ],
     "writes": []
   },
@@ -32,9 +33,9 @@
     "https://unpkg.com"
   ],
   "resource_limits": {
-    "max_db_bytes": 10485760,
     "max_file_bytes": 10485760,
-    "max_files_bytes": 524288000
+    "max_files_bytes": 524288000,
+    "max_docs_bytes": 524288000
   },
   "icon": "📄"
 }
