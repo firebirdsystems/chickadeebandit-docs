@@ -738,6 +738,22 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
   if (f) await uploadFile(f);
 });
 
+// ── Deep link ──────────────────────────────────────────────────────────────────
+async function handleDeepLink() {
+  const fileId = new URLSearchParams(window.location.search).get("fileId");
+  if (!fileId) return;
+  const allDocs = await docsGet();
+  const doc = (Array.isArray(allDocs) ? allDocs : []).find(d => d.id === fileId);
+  if (!doc) return;
+  if (doc.folder) {
+    await loadFiles(doc.folder);
+    currentFolder = folders.find(f => f.name === doc.folder) ?? { name: doc.folder, visibility: "everyone" };
+    renderSidebar();
+    renderMain();
+  }
+  openPreview(doc);
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 (async () => {
   if (!DOCS) {
@@ -754,6 +770,7 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
   storageInfo = info;
   await loadFolders();
   renderSidebar();
+  handleDeepLink();
 })();
 </script>
 </body>
