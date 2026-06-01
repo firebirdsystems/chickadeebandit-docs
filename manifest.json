@@ -18,9 +18,12 @@
   "data_access": {
     "reads": [
       "family.members",
-      "family.groups"
+      "family.groups",
+      "family.documents"
     ],
-    "writes": []
+    "writes": [
+      "family.documents"
+    ]
   },
   "permissions": {
     "default_audience": "everyone",
