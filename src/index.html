@@ -91,7 +91,12 @@
       background: var(--red); color: #fff; border: none; border-radius: 4px;
       padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
     }
-    .file-card:hover .file-del { opacity: 1; }
+    .file-rename {
+      position: absolute; top: 6px; left: 6px; opacity: 0;
+      background: var(--accent-light); color: var(--accent); border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
+    }
+    .file-card:hover .file-del, .file-card:hover .file-rename { opacity: 1; }
 
     /* ── Upload zone ── */
     .drop-zone {
@@ -246,6 +251,7 @@ let currentFiles   = [];
 let storageInfo    = { totalBytes: 0, limit: 0 };
 let uploading      = false;
 let hubGroups      = [];   // HubMemberGroup[]
+let docSearch      = "";
 
 // ── Docs API helpers ───────────────────────────────────────────────────────────
 async function docsGet(params = {}) {
@@ -438,6 +444,8 @@ function renderMain() {
   title.innerHTML = esc(currentFolder.name) + lockBadge;
 
   actions.innerHTML = `
+    <input type="search" placeholder="Search files…" value="${esc(docSearch)}" oninput="setDocSearch(this.value)"
+      style="border:1.5px solid var(--border-mid);border-radius:8px;padding:5px 10px;font-size:0.82rem;font-family:inherit;background:var(--card);color:var(--text);width:150px" />
     ${IS_ADULT ? `<button class="btn btn-ghost btn-sm" onclick="openRenameFolder()">Rename</button>` : ""}
     ${IS_ADULT ? `<button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteFolderCurrent()">Delete folder</button>` : ""}
     <button class="btn btn-primary btn-sm" onclick="triggerUpload()">↑ Upload</button>
@@ -464,14 +472,22 @@ function renderMain() {
       </div>
     </div>`;
 
+  const filtered = docSearch ? currentFiles.filter(d => d.title.toLowerCase().includes(docSearch.toLowerCase())) : currentFiles;
+
   if (currentFiles.length === 0) {
     grid.innerHTML = dropZone;
     return;
   }
 
-  const cards = currentFiles.map(doc => {
+  if (filtered.length === 0) {
+    grid.innerHTML = dropZone + `<div class="empty" style="padding:20px">No files match your search.</div>`;
+    return;
+  }
+
+  const cards = filtered.map(doc => {
     return `
       <div class="file-card" onclick="previewDoc('${doc.id}')">
+        <button class="file-rename" onclick="event.stopPropagation();renameDoc('${doc.id}')" title="Rename">✏</button>
         <button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete">✕</button>
         <div class="file-thumb">${isImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${fileIcon(doc.mimeType)}</span>`}</div>
         <div class="file-name" title="${esc(doc.title)}">${esc(doc.title)}</div>
@@ -484,6 +500,45 @@ function renderMain() {
 
 // ── Window actions ─────────────────────────────────────────────────────────────
 window.selectFolder = selectFolder;
+
+window.setDocSearch = function(v) { docSearch = v; renderMain(); };
+
+window.renameDoc = async function(id) {
+  const doc = currentFiles.find(d => d.id === id);
+  if (!doc) return;
+  const el = document.createElement("div");
+  el.className = "modal-backdrop";
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Rename File</h3>
+      <div class="form-group">
+        <label>Name</label>
+        <input id="rename-doc-input" type="text" value="${esc(doc.title)}" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" id="rename-doc-save-btn">Save</button>
+      </div>
+    </div>`;
+  el.addEventListener("click", e => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+  const input = document.getElementById("rename-doc-input");
+  input?.focus(); input?.select();
+  input?.addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("rename-doc-save-btn")?.click();
+    if (e.key === "Escape") el.remove();
+  });
+  document.getElementById("rename-doc-save-btn").addEventListener("click", async () => {
+    const name = document.getElementById("rename-doc-input")?.value?.trim();
+    if (!name) return;
+    const btn = document.getElementById("rename-doc-save-btn");
+    btn.disabled = true; btn.textContent = "Saving…";
+    await fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: name }) });
+    el.remove();
+    await loadFiles(currentFolder.name);
+    renderMain();
+  });
+};
 
 window.deleteFolderCurrent = () => currentFolder && deleteFolder(currentFolder.name);
 
