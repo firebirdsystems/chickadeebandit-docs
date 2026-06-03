@@ -326,10 +326,13 @@ async function createFolder(name, visibility) {
 async function deleteFolder(name) {
   if (!await hubConfirm({ message: "Delete this folder?", description: "All documents inside will be permanently removed.", confirmLabel: "Delete folder", destructive: true })) return;
   const docs = await docsGet({ folder: name });
-  for (const d of (Array.isArray(docs) ? docs : [])) {
-    await docsDelete(d.id);
-    if (d.fileKey) await files.delete(d.fileKey).catch(() => {});
-  }
+  // Delete each doc's record and file in parallel, and all docs in parallel
+  await Promise.all((Array.isArray(docs) ? docs : []).map(d =>
+    Promise.all([
+      docsDelete(d.id),
+      d.fileKey ? files.delete(d.fileKey).catch(() => {}) : Promise.resolve(),
+    ])
+  ));
   const meta = await getFoldersMeta();
   delete meta[name];
   await saveFoldersMeta(meta);
@@ -367,8 +370,8 @@ async function uploadFile(file) {
       folder: currentFolder.name,
     });
 
-    await loadFiles(currentFolder.name);
-    await loadFolders();
+    // Reload files and folder counts in parallel
+    await Promise.all([loadFiles(currentFolder.name), loadFolders()]);
     renderSidebar();
   } catch (err) {
     alert(err.message ?? "Upload failed");
@@ -380,10 +383,20 @@ async function uploadFile(file) {
 
 async function deleteDocument(doc) {
   if (!await hubConfirm({ message: `Delete "${doc.title}"?`, confirmLabel: "Delete", destructive: true })) return;
-  await docsDelete(doc.id);
-  if (doc.fileKey) await files.delete(doc.fileKey).catch(() => {});
-  await loadFiles(currentFolder.name);
-  await loadFolders();
+
+  // Optimistic: remove from local state and render immediately
+  currentFiles = currentFiles.filter(d => d.id !== doc.id);
+  const folder = folders.find(f => f.name === currentFolder?.name);
+  if (folder) folder.doc_count = Math.max(0, (folder.doc_count ?? 1) - 1);
+  renderSidebar();
+  renderMain();
+
+  // Delete record and file in parallel, then sync both in parallel
+  await Promise.all([
+    docsDelete(doc.id),
+    doc.fileKey ? files.delete(doc.fileKey).catch(() => {}) : Promise.resolve(),
+  ]);
+  await Promise.all([loadFiles(currentFolder.name), loadFolders()]);
   renderSidebar();
   renderMain();
 }
@@ -531,12 +544,21 @@ window.renameDoc = async function(id) {
   document.getElementById("rename-doc-save-btn").addEventListener("click", async () => {
     const name = document.getElementById("rename-doc-input")?.value?.trim();
     if (!name) return;
-    const btn = document.getElementById("rename-doc-save-btn");
-    btn.disabled = true; btn.textContent = "Saving…";
-    await fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: name }) });
+
+    // Optimistic: update title in local state and render immediately
+    const localDoc = currentFiles.find(d => d.id === id);
+    const prevTitle = localDoc?.title;
+    if (localDoc) localDoc.title = name;
     el.remove();
-    await loadFiles(currentFolder.name);
     renderMain();
+
+    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: name }) })
+      .then(() => loadFiles(currentFolder.name).then(renderMain))
+      .catch(() => {
+        // Roll back on failure
+        if (localDoc) localDoc.title = prevTitle;
+        renderMain();
+      });
   });
 };
 
@@ -587,26 +609,27 @@ async function renderPdf(blobUrl, container) {
     const pdf = await getDocument(blobUrl).promise;
     container.innerHTML = "";
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page    = await pdf.getPage(i);
-      const vp      = page.getViewport({ scale: 1 });
-      const scale   = Math.min(1.5, (container.clientWidth - 32) / vp.width);
-      const viewport = page.getViewport({ scale });
-
-      const canvas  = document.createElement("canvas");
-      canvas.width  = viewport.width;
-      canvas.height = viewport.height;
+    // Create all canvases upfront to preserve DOM order, then render all pages in parallel
+    const entries = Array.from({ length: pdf.numPages }, (_, i) => {
+      const canvas = document.createElement("canvas");
       canvas.style.cssText = "display:block;box-shadow:0 2px 8px rgba(0,0,0,.4);max-width:100%";
-
       const label = document.createElement("p");
-      label.textContent = `Page ${i} of ${pdf.numPages}`;
+      label.textContent = `Page ${i + 1} of ${pdf.numPages}`;
       label.style.cssText = "color:#aaa;font-size:.72rem;text-align:center;margin-top:-4px";
-
       container.appendChild(canvas);
       container.appendChild(label);
+      return { canvas, pageNum: i + 1 };
+    });
 
+    await Promise.all(entries.map(async ({ canvas, pageNum }) => {
+      const page     = await pdf.getPage(pageNum);
+      const vp       = page.getViewport({ scale: 1 });
+      const scale    = Math.min(1.5, (container.clientWidth - 32) / vp.width);
+      const viewport = page.getViewport({ scale });
+      canvas.width   = viewport.width;
+      canvas.height  = viewport.height;
       await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-    }
+    }));
   } catch (err) {
     container.innerHTML = `<p style="color:#fca5a5;padding:20px">Failed to render PDF: ${err.message}</p>`;
   }
@@ -767,14 +790,14 @@ window.submitRename = async function() {
   const btn = document.querySelector('.modal-actions .btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   const meta = await getFoldersMeta();
-  // Move docs to new folder name if it changed
+  // Move docs to new folder name if it changed — all PATCHes in parallel
   if (name !== currentFolder.name) {
     const docs = await docsGet({ folder: currentFolder.name });
-    for (const d of (Array.isArray(docs) ? docs : [])) {
-      await fetch(`${DOCS}/${d.id}`, { method: "PATCH",
+    await Promise.all((Array.isArray(docs) ? docs : []).map(d =>
+      fetch(`${DOCS}/${d.id}`, { method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder: name }) });
-    }
+        body: JSON.stringify({ folder: name }) })
+    ));
     delete meta[currentFolder.name];
   }
   meta[name] = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
