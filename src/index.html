@@ -96,7 +96,12 @@
       background: var(--accent-light); color: var(--accent); border: 1px solid var(--border); border-radius: 4px;
       padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
     }
-    .file-card:hover .file-del, .file-card:hover .file-rename { opacity: 1; }
+    .file-move {
+      position: absolute; bottom: 6px; right: 6px; opacity: 0;
+      background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
+    }
+    .file-card:hover .file-del, .file-card:hover .file-rename, .file-card:hover .file-move { opacity: 1; }
 
     /* ── Upload zone ── */
     .drop-zone {
@@ -233,7 +238,7 @@
 <script type="module">
 import { memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { ALLOWED_EXTENSIONS, isImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
+import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
 
 // ── Globals ────────────────────────────────────────────────────────────────────
 const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
@@ -502,7 +507,8 @@ function renderMain() {
       <div class="file-card" onclick="previewDoc('${doc.id}')">
         <button class="file-rename" onclick="event.stopPropagation();renameDoc('${doc.id}')" title="Rename">✏</button>
         <button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete">✕</button>
-        <div class="file-thumb">${isImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${fileIcon(doc.mimeType)}</span>`}</div>
+        ${folders.length > 1 ? `<button class="file-move" onclick="event.stopPropagation();moveDoc('${doc.id}')" title="Move to folder">Move</button>` : ""}
+        <div class="file-thumb">${isPreviewableImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${fileIcon(doc.mimeType)}</span>`}</div>
         <div class="file-name" title="${esc(doc.title)}">${esc(doc.title)}</div>
         <div class="file-meta">${formatBytes(doc.sizeBytes ?? 0)} · ${formatRelativeDate(doc.createdAt)}</div>
       </div>`;
@@ -559,6 +565,53 @@ window.renameDoc = async function(id) {
         if (localDoc) localDoc.title = prevTitle;
         renderMain();
       });
+  });
+};
+
+window.moveDoc = async function(id) {
+  const doc = currentFiles.find(d => d.id === id);
+  if (!doc) return;
+  const otherFolders = folders.filter(f => f.name !== currentFolder?.name);
+  if (otherFolders.length === 0) {
+    alert("No other folders to move to. Create another folder first.");
+    return;
+  }
+  const el = document.createElement("div");
+  el.className = "modal-backdrop";
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Move File</h3>
+      <div class="form-group">
+        <label>Move "${esc(doc.title)}" to</label>
+        <select id="move-folder-select">
+          ${otherFolders.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" id="move-doc-save-btn">Move</button>
+      </div>
+    </div>`;
+  el.addEventListener("click", e => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+  document.getElementById("move-doc-save-btn").addEventListener("click", async () => {
+    const targetName = document.getElementById("move-folder-select")?.value;
+    if (!targetName) return;
+
+    // Optimistic update: remove from current folder view
+    currentFiles = currentFiles.filter(d => d.id !== id);
+    const srcFolder = folders.find(f => f.name === currentFolder?.name);
+    if (srcFolder) srcFolder.doc_count = Math.max(0, (srcFolder.doc_count ?? 1) - 1);
+    const dstFolder = folders.find(f => f.name === targetName);
+    if (dstFolder) dstFolder.doc_count = (dstFolder.doc_count ?? 0) + 1;
+    el.remove();
+    renderSidebar();
+    renderMain();
+
+    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder: targetName }) })
+      .then(() => Promise.all([loadFiles(currentFolder.name), loadFolders()]))
+      .then(() => { renderSidebar(); renderMain(); })
+      .catch(() => Promise.all([loadFiles(currentFolder?.name), loadFolders()]).then(() => { renderSidebar(); renderMain(); }));
   });
 };
 
@@ -698,7 +751,7 @@ async function openPreview(doc) {
     document.body.removeChild(a);
   };
 
-  if (isImage(doc.mimeType)) {
+  if (isPreviewableImage(doc.mimeType)) {
     bodyEl.innerHTML = `<img src="${blobUrl}" alt="${esc(doc.title)}" />`;
   } else if (isPdf(doc.mimeType)) {
     await renderPdf(blobUrl, bodyEl);
