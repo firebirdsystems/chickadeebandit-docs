@@ -363,8 +363,10 @@ async function uploadFile(file) {
       }
     });
 
-    // Register document in hub documents table
-    const sharedWith = currentFolder.visibility === "everyone" ? ["everyone"] : [];
+    // Register document in hub documents table. The folder's visibility maps
+    // directly to the platform's sharedWith vocabulary: "everyone", "adults",
+    // or a group id — all enforced server-side at read time.
+    const sharedWith = [currentFolder.visibility];
     await docsCreate({
       title: file.name,
       category: "other",
@@ -608,7 +610,10 @@ window.moveDoc = async function(id) {
     renderSidebar();
     renderMain();
 
-    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder: targetName }) })
+    // Carry the target folder's visibility onto the doc so access tracks the destination.
+    const movePatch = { folder: targetName };
+    if (dstFolder) movePatch.sharedWith = [dstFolder.visibility];
+    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(movePatch) })
       .then(() => Promise.all([loadFiles(currentFolder.name), loadFolders()]))
       .then(() => { renderSidebar(); renderMain(); })
       .catch(() => Promise.all([loadFiles(currentFolder?.name), loadFolders()]).then(() => { renderSidebar(); renderMain(); }));
@@ -843,15 +848,23 @@ window.submitRename = async function() {
   const btn = document.querySelector('.modal-actions .btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   const meta = await getFoldersMeta();
-  // Move docs to new folder name if it changed — all PATCHes in parallel
-  if (name !== currentFolder.name) {
+  // Re-sync the folder's docs when the name and/or visibility changes. A
+  // visibility change must rewrite each doc's sharedWith so server-side access
+  // tracks the folder (e.g. switching "everyone" → "adults"); a name change
+  // moves them to the new folder name. Both go out as parallel PATCHes.
+  const nameChanged = name !== currentFolder.name;
+  const visChanged  = vis  !== currentFolder.visibility;
+  if (nameChanged || visChanged) {
     const docs = await docsGet({ folder: currentFolder.name });
-    await Promise.all((Array.isArray(docs) ? docs : []).map(d =>
-      fetch(`${DOCS}/${d.id}`, { method: "PATCH",
+    await Promise.all((Array.isArray(docs) ? docs : []).map(d => {
+      const patch = {};
+      if (nameChanged) patch.folder = name;
+      if (visChanged)  patch.sharedWith = [vis];
+      return fetch(`${DOCS}/${d.id}`, { method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder: name }) })
-    ));
-    delete meta[currentFolder.name];
+        body: JSON.stringify(patch) });
+    }));
+    if (nameChanged) delete meta[currentFolder.name];
   }
   meta[name] = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
   await saveFoldersMeta(meta);
