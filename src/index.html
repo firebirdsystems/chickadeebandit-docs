@@ -780,7 +780,7 @@ window.openNewFolder = function() {
       <h3>New Folder</h3>
       <div class="form-group">
         <label>Folder name</label>
-        <input id="new-folder-name" type="text" placeholder="e.g. Medical Records" autofocus />
+        <input id="new-folder-name" type="text" placeholder="e.g. Medical Records" data-autofocus />
       </div>
       <div class="form-group">
         <label>Visible to</label>
@@ -798,7 +798,9 @@ window.openNewFolder = function() {
     </div>`;
   el.addEventListener("click", e => { if (e.target === el) el.remove(); });
   document.body.appendChild(el);
-  setTimeout(() => document.getElementById("new-folder-name")?.focus(), 50);
+  // Programmatic focus works inside cross-origin iframes (unlike the autofocus
+  // attribute, which the browser blocks) because it rides the user's click gesture.
+  el.querySelector("[data-autofocus]")?.focus();
 };
 
 window.submitNewFolder = async function() {
