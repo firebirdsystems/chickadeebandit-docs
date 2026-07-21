@@ -29,6 +29,20 @@
     "default_audience": "everyone",
     "requires_approval": false
   },
+  "contexts": [
+    "household",
+    "shared_space.roster"
+  ],
+  "document_acls": {
+    "write": {
+      "roster_steward_only": true
+    }
+  },
+  "file_acls": {
+    "write": {
+      "roster_steward_only": true
+    }
+  },
   "nav": {
     "label": "Documents"
   },
