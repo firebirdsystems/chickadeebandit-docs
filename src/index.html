@@ -339,13 +339,10 @@ async function createFolder(name, visibility) {
 async function deleteFolder(name) {
   if (!await hubConfirm({ message: "Delete this folder?", description: "All documents inside will be permanently removed.", confirmLabel: "Delete folder", destructive: true })) return;
   const docs = await docsGet({ folder: name });
-  // Delete each doc's record and file in parallel, and all docs in parallel
-  await Promise.all((Array.isArray(docs) ? docs : []).map(d =>
-    Promise.all([
-      docsDelete(d.id),
-      d.fileKey ? files.delete(d.fileKey).catch(() => {}) : Promise.resolve(),
-    ])
-  ));
+  // Deleting the record cascades to its stored file server-side, so a failed
+  // request can no longer leave the bytes behind (they stay downloadable by id
+  // and charged against the household's quota).
+  await Promise.all((Array.isArray(docs) ? docs : []).map(d => docsDelete(d.id)));
   const meta = await getFoldersMeta();
   delete meta[name];
   await saveFoldersMeta(meta);
@@ -406,11 +403,9 @@ async function deleteDocument(doc) {
   renderSidebar();
   renderMain();
 
-  // Delete record and file in parallel, then sync both in parallel
-  await Promise.all([
-    docsDelete(doc.id),
-    doc.fileKey ? files.delete(doc.fileKey).catch(() => {}) : Promise.resolve(),
-  ]);
+  // Deleting the record cascades to its stored file server-side; the client no
+  // longer races a best-effort file delete whose failure nobody observed.
+  await docsDelete(doc.id);
   await Promise.all([loadFiles(currentFolder.name), loadFolders()]);
   renderSidebar();
   renderMain();
