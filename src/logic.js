@@ -42,3 +42,21 @@ export function formatBytes(bytes) {
 export function accept() {
   return Object.keys(ALLOWED_EXTENSIONS).join(",");
 }
+
+/**
+ * Whether a folder name can address itself as a store-patch path segment.
+ * `folders_meta` is a JSON map keyed by folder name, and targeted edits go
+ * through PATCH /api/store, whose paths are dot-separated: a dot in the name
+ * would address a nested object, an over-long one is refused, and the
+ * prototype keys are refused outright. Names failing this fall back to the
+ * whole-blob write, which is racy — so new names are held to it.
+ */
+const FORBIDDEN_FOLDER_NAMES = new Set(["__proto__", "prototype", "constructor"]);
+export const MAX_FOLDER_NAME_LENGTH = 64;
+export function folderPathSafe(name) {
+  return typeof name === "string"
+    && name.length > 0
+    && name.length <= MAX_FOLDER_NAME_LENGTH
+    && !name.includes(".")
+    && !FORBIDDEN_FOLDER_NAMES.has(name);
+}

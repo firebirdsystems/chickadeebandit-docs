@@ -238,7 +238,7 @@
 <script type="module">
 import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept } from "./logic.js";
+import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH } from "./logic.js";
 
 // ── Globals ────────────────────────────────────────────────────────────────────
 const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
@@ -277,7 +277,14 @@ async function docsCreate(body) {
   return res.json();
 }
 async function docsDelete(id) {
-  await fetch(`${DOCS}/${id}`, { method: "DELETE" });
+  const res = await fetch(`${DOCS}/${id}`, { method: "DELETE" });
+  return res.ok;
+}
+async function docsPatch(id, patch) {
+  const res = await fetch(`${DOCS}/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+  });
+  return res.ok;
 }
 
 // Folder metadata stored in app KV as "folders_meta": { [name]: { visibility, createdBy } }
@@ -288,10 +295,34 @@ async function getFoldersMeta() {
   const { value } = await res.json();
   return value ? JSON.parse(value) : {};
 }
-async function saveFoldersMeta(meta) {
-  if (!STORE) return;
-  await fetch(STORE, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: "folders_meta", value: JSON.stringify(meta) }) });
+/**
+ * Applies targeted edits to the folders_meta blob through PATCH /api/store,
+ * which serializes read-modify-write inside the usage Durable Object. The
+ * previous whole-blob POST read the map, mutated it in the browser and wrote it
+ * all back, so two adults renaming different folders at the same time silently
+ * discarded one of the edits — and the delete path could resurrect a folder
+ * another tab had just removed.
+ *
+ * Falls back to the whole-blob write only for folder names that cannot be
+ * expressed as a path segment (legacy names containing a dot).
+ */
+async function patchFoldersMeta(ops, fallbackMeta) {
+  if (!STORE) return true;
+  if (ops.every((op) => folderPathSafe(op.path.split(".")[0]))) {
+    const res = await fetch(STORE, { method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: "folders_meta", ops }) });
+    if (res.ok) return true;
+    // A rejected patch is reported, not silently downgraded to the racy write.
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `Could not save folder settings (${res.status})`);
+  }
+  const res = await fetch(STORE, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "folders_meta", value: JSON.stringify(fallbackMeta) }) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? `Could not save folder settings (${res.status})`);
+  }
+  return true;
 }
 
 // ── Data loading ───────────────────────────────────────────────────────────────
@@ -328,12 +359,25 @@ async function loadFiles(folderName) {
 
 // ── Actions ────────────────────────────────────────────────────────────────────
 async function createFolder(name, visibility) {
+  const folder = name.trim();
+  if (!folderPathSafe(folder)) {
+    await hubAlert("That folder name can't be used.", {
+      description: `Folder names can't contain a dot and must be ${MAX_FOLDER_NAME_LENGTH} characters or fewer.`,
+    });
+    return;
+  }
+  const entry = { visibility, createdBy: HUB_MEMBER?.id ?? "unknown", createdAt: new Date().toISOString() };
   const meta = await getFoldersMeta();
-  meta[name.trim()] = { visibility, createdBy: HUB_MEMBER?.id ?? "unknown", createdAt: new Date().toISOString() };
-  await saveFoldersMeta(meta);
+  meta[folder] = entry;
+  try {
+    await patchFoldersMeta([{ op: "set", path: folder, value: entry }], meta);
+  } catch (err) {
+    await hubAlert("Could not create the folder.", { description: err.message });
+    return;
+  }
   await loadFolders();
   renderSidebar();
-  selectFolder(name.trim());
+  selectFolder(folder);
 }
 
 async function deleteFolder(name) {
@@ -342,10 +386,27 @@ async function deleteFolder(name) {
   // Deleting the record cascades to its stored file server-side, so a failed
   // request can no longer leave the bytes behind (they stay downloadable by id
   // and charged against the household's quota).
-  await Promise.all((Array.isArray(docs) ? docs : []).map(d => docsDelete(d.id)));
+  const failed = (await Promise.all(
+    (Array.isArray(docs) ? docs : []).map(async (d) => (await docsDelete(d.id)) ? null : d),
+  )).filter(Boolean);
+  if (failed.length > 0) {
+    // The folder entry stays: dropping it while documents remain would hide
+    // them from the sidebar without deleting them, and their bytes keep
+    // counting against the household's quota with nothing left pointing at them.
+    await hubAlert(`${failed.length} ${failed.length === 1 ? "document" : "documents"} could not be deleted.`, {
+      description: `The folder was left in place so nothing is orphaned: ${failed.map(d => d.title ?? d.id).join(", ")}. Try again.`,
+    });
+    await loadFolders();
+    renderSidebar();
+    return;
+  }
   const meta = await getFoldersMeta();
   delete meta[name];
-  await saveFoldersMeta(meta);
+  try {
+    await patchFoldersMeta([{ op: "delete", path: name }], meta);
+  } catch (err) {
+    await hubAlert("The documents were deleted, but the folder could not be removed.", { description: err.message });
+  }
   if (currentFolder?.name === name) { currentFolder = null; currentFiles = []; renderMain(); }
   await loadFolders();
   renderSidebar();
@@ -851,28 +912,59 @@ window.submitRename = async function() {
   const vis  = document.getElementById("rename-vis")?.value ?? "everyone";
   if (!name || !currentFolder) return;
   const btn = document.querySelector('.modal-actions .btn-primary');
+  const restoreButton = () => { if (btn) { btn.disabled = false; btn.textContent = "Save"; } };
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const nameChanged = name !== currentFolder.name;
+  const visChanged  = vis  !== currentFolder.visibility;
+  if (nameChanged && !folderPathSafe(name)) {
+    restoreButton();
+    await hubAlert("That folder name can't be used.", {
+      description: `Folder names can't contain a dot and must be ${MAX_FOLDER_NAME_LENGTH} characters or fewer.`,
+    });
+    return;
+  }
   const meta = await getFoldersMeta();
   // Re-sync the folder's docs when the name and/or visibility changes. A
   // visibility change must rewrite each doc's sharedWith so server-side access
   // tracks the folder (e.g. switching "everyone" → "adults"); a name change
-  // moves them to the new folder name. Both go out as parallel PATCHes.
-  const nameChanged = name !== currentFolder.name;
-  const visChanged  = vis  !== currentFolder.visibility;
+  // moves them to the new folder name.
+  //
+  // The folder's own metadata is written ONLY once every document PATCH has
+  // succeeded. Previously the responses were never inspected, so a partial
+  // failure still recorded "adults only" — and the sidebar rendered the 🔒
+  // badge from that intent while the documents it describes were still shared
+  // with everyone. The badge now only ever reflects what the server accepted.
   if (nameChanged || visChanged) {
     const docs = await docsGet({ folder: currentFolder.name });
-    await Promise.all((Array.isArray(docs) ? docs : []).map(d => {
-      const patch = {};
-      if (nameChanged) patch.folder = name;
-      if (visChanged)  patch.sharedWith = [vis];
-      return fetch(`${DOCS}/${d.id}`, { method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch) });
-    }));
+    const patch = {};
+    if (nameChanged) patch.folder = name;
+    if (visChanged)  patch.sharedWith = [vis];
+    const failed = (await Promise.all(
+      (Array.isArray(docs) ? docs : []).map(async (d) => (await docsPatch(d.id, patch)) ? null : d),
+    )).filter(Boolean);
+    if (failed.length > 0) {
+      restoreButton();
+      await hubAlert(`${failed.length} ${failed.length === 1 ? "document" : "documents"} could not be updated.`, {
+        description: `The folder was left unchanged so nothing claims a protection it doesn't have: ${failed.map(d => d.title ?? d.id).join(", ")}. Try again.`,
+      });
+      await loadFolders();
+      renderSidebar();
+      renderMain();
+      return;
+    }
     if (nameChanged) delete meta[currentFolder.name];
   }
-  meta[name] = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
-  await saveFoldersMeta(meta);
+  const entry = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
+  meta[name] = entry;
+  const ops = [{ op: "set", path: name, value: entry }];
+  if (nameChanged) ops.push({ op: "delete", path: currentFolder.name });
+  try {
+    await patchFoldersMeta(ops, meta);
+  } catch (err) {
+    restoreButton();
+    await hubAlert("Could not save folder settings.", { description: err.message });
+    return;
+  }
   document.querySelector(".modal-backdrop")?.remove();
   currentFolder = { ...currentFolder, name, visibility: vis };
   await loadFolders();

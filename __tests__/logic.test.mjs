@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   ALLOWED_EXTENSIONS,
   isImage, isPdf, fileIcon, formatBytes, accept,
+  folderPathSafe, MAX_FOLDER_NAME_LENGTH,
 } from "../src/logic.js";
 
 // ── ALLOWED_EXTENSIONS ────────────────────────────────────────────────────────
@@ -65,4 +66,29 @@ describe("accept", () => {
   });
   it("includes image/jpeg", () => expect(accept()).toContain("image/jpeg"));
   it("includes application/pdf", () => expect(accept()).toContain("application/pdf"));
+});
+
+// ── folderPathSafe ─────────────────────────────────────────────────────────────
+// folders_meta edits go through PATCH /api/store as dot-separated paths, so a
+// folder name is also a path segment. Names that can't be one fall back to the
+// racy whole-blob write, which is exactly what the patch path exists to avoid.
+describe("folderPathSafe", () => {
+  it("accepts ordinary folder names", () => {
+    expect(folderPathSafe("Taxes")).toBe(true);
+    expect(folderPathSafe("School 2026")).toBe(true);
+    expect(folderPathSafe("a".repeat(MAX_FOLDER_NAME_LENGTH))).toBe(true);
+  });
+  it("rejects a dot — it would address a nested object instead of the folder", () => {
+    expect(folderPathSafe("taxes.2026")).toBe(false);
+  });
+  it("rejects the prototype keys the hub refuses outright", () => {
+    for (const name of ["__proto__", "prototype", "constructor"]) {
+      expect(folderPathSafe(name)).toBe(false);
+    }
+  });
+  it("rejects empty and over-long names", () => {
+    expect(folderPathSafe("")).toBe(false);
+    expect(folderPathSafe("a".repeat(MAX_FOLDER_NAME_LENGTH + 1))).toBe(false);
+    expect(folderPathSafe(undefined)).toBe(false);
+  });
 });
