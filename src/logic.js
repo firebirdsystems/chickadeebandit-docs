@@ -60,3 +60,12 @@ export function folderPathSafe(name) {
     && !name.includes(".")
     && !FORBIDDEN_FOLDER_NAMES.has(name);
 }
+
+/**
+ * Fields the in-app search matches against (see hub-sdk `searchMatch`). The
+ * mime type is included so "pdf" or "image" finds files by kind — a document
+ * library is browsed by type at least as often as by name.
+ */
+export function searchableFields(doc) {
+  return [doc.title, doc.mimeType];
+}

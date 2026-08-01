@@ -236,9 +236,9 @@
 <input type="file" id="file-input" style="display:none" />
 
 <script type="module">
-import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm } from "/hub-sdk.js";
+import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm, searchMatch } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH } from "./logic.js";
+import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "./logic.js";
 
 // ── Globals ────────────────────────────────────────────────────────────────────
 const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
@@ -556,7 +556,7 @@ function renderMain() {
       </div>
     </div>` : "";
 
-  const filtered = docSearch ? currentFiles.filter(d => d.title.toLowerCase().includes(docSearch.toLowerCase())) : currentFiles;
+  const filtered = docSearch ? currentFiles.filter(d => searchMatch(docSearch, searchableFields(d))) : currentFiles;
 
   if (currentFiles.length === 0) {
     grid.innerHTML = dropZone;

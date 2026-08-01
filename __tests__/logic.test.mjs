@@ -2,8 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   ALLOWED_EXTENSIONS,
   isImage, isPdf, fileIcon, formatBytes, accept,
-  folderPathSafe, MAX_FOLDER_NAME_LENGTH,
-} from "../src/logic.js";
+  folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "../src/logic.js";
 
 // ── ALLOWED_EXTENSIONS ────────────────────────────────────────────────────────
 describe("ALLOWED_EXTENSIONS", () => {
@@ -90,5 +89,13 @@ describe("folderPathSafe", () => {
     expect(folderPathSafe("")).toBe(false);
     expect(folderPathSafe("a".repeat(MAX_FOLDER_NAME_LENGTH + 1))).toBe(false);
     expect(folderPathSafe(undefined)).toBe(false);
+  });
+});
+
+describe("searchableFields", () => {
+  it("matches on the file kind as well as the name", () => {
+    const fields = searchableFields({ title: "Lease 2026", mimeType: "application/pdf" });
+    expect(fields).toContain("Lease 2026");
+    expect(fields).toContain("application/pdf"); // so typing "pdf" finds it
   });
 });
