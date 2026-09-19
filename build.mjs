@@ -194,14 +194,34 @@ function surfaceErrors(m) {
       for (const req of ["title", "when_at"]) {
         if (!aliases.has(req)) errs.push(`manifest.agenda.source.query must select an "${req}" alias`);
       }
+      // A range-capable entry answers for a whole week in ONE statement, so
+      // holding it to the per-day 20 would make the cheaper form show less
+      // than the day-token form it replaces. Keep in sync with the hub's
+      // MAX_AGENDA_LIMIT / MAX_AGENDA_RANGE_LIMIT.
+      const rangeCapable = /:range_(start|end)(_at)?\b/.test(q);
+      const maxLim = rangeCapable ? 140 : 20;
       const lim = limitOf(q);
       if (lim === null) errs.push("manifest.agenda.source.query must end with a LIMIT");
-      else if (lim < 1 || lim > 20) errs.push(`manifest.agenda.source.query LIMIT must be 1-20 (got ${lim})`);
-      // A day token has to narrow the scan, not just be selected or sorted on.
-      // It counts as filtering if it appears anywhere in the WHERE / JOIN ... ON
-      // region, including nested in a function call -- occasions compares
-      // `event_month = CAST(strftime('%m', :today) AS INTEGER)`.
-      const tokens = [...q.matchAll(/:(today|day_start|day_end)\b/g)].map(x => x[0]);
+      else if (lim < 1 || lim > maxLim) errs.push(`manifest.agenda.source.query LIMIT must be 1-${maxLim} (got ${lim})`);
+      // The two token families answer different questions and must not be
+      // mixed: `:today` inside a range query has no single meaning.
+      if (rangeCapable && /:(today|day_start|day_end)\b/.test(q)) {
+        errs.push("manifest.agenda.source.query mixes day tokens with range tokens; use one family");
+      }
+      // `on_range` says what a DAY-token entry means on a day that is not
+      // today; a range-capable entry already runs once and dates its own rows.
+      if (agenda.on_range !== undefined) {
+        if (!["each_day", "today_only"].includes(agenda.on_range)) {
+          errs.push('manifest.agenda.on_range must be "each_day" or "today_only"');
+        } else if (rangeCapable) {
+          errs.push("manifest.agenda.on_range has no meaning on a range-capable query");
+        }
+      }
+      // A day or range token has to narrow the scan, not just be selected or
+      // sorted on. It counts as filtering if it appears anywhere in the
+      // WHERE / JOIN ... ON region, including nested in a function call --
+      // occasions compares `event_month = CAST(strftime('%m', :today) AS INTEGER)`.
+      const tokens = [...q.matchAll(/:(today|day_start|day_end|range_start_at|range_end_at|range_start|range_end)\b/g)].map(x => x[0]);
       if (tokens.length > 0) {
         const anchor = /\bWHERE\b|\bON\b/i.exec(q);
         const filterRegion = anchor ? q.slice(anchor.index).replace(/\bORDER\s+BY\b[\s\S]*$/i, "") : "";
@@ -216,6 +236,11 @@ function surfaceErrors(m) {
   if (glance && glance.source?.kind === "sql") {
     const q = glance.source.query;
     if (checkQuery(q, "manifest.glance")) {
+      // Range tokens are agenda-only: glance resolves no range, so the hub
+      // would leave the token in the SQL and the tile would render empty.
+      if (/:range_(start|end)(_at)?\b/.test(q)) {
+        errs.push("manifest.glance.source.query must not use range tokens — they are agenda-only");
+      }
       const aliases = aliasesOf(q);
       const d = glance.display ?? {};
       const TEMPLATES = { stat: ["value"], list: ["title"], badge: ["count"] };
