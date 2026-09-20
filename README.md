@@ -1,6 +1,6 @@
 # Family Documents
 
-A [Chickadee Bandit](http://chickadeebandit.com) app.
+A [Chickadee Bandit](https://chickadeebandit.com/app-library/docs) app.
 
 Store and share family documents — receipts, medical records, school papers, insurance policies. Organise into folders with adult-only or family-wide visibility.
 
