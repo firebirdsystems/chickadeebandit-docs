@@ -206,7 +206,7 @@
   <aside class="sidebar">
     <div class="sidebar-header">
       <h2>Folders</h2>
-      <button class="btn-icon" id="new-folder-btn" title="New folder" onclick="openNewFolder()">＋</button>
+      <button class="btn-icon" id="new-folder-btn" title="New folder" aria-label="New folder" onclick="openNewFolder()"></button>
     </div>
     <div class="folder-list" id="folder-list">
       <div style="padding:16px;color:var(--muted);font-size:.8rem">Loading…</div>
@@ -225,7 +225,7 @@
     </div>
     <div class="files-grid" id="files-grid">
       <div class="empty">
-        <div class="empty-icon">📁</div>
+        <div class="empty-icon"></div>
         <p>Select a folder to view documents</p>
       </div>
     </div>
@@ -236,9 +236,13 @@
 <input type="file" id="file-input" style="display:none" />
 
 <script type="module">
-import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm, searchMatch } from "/hub-sdk.js";
+import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm, searchMatch, glyph, chickadee } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileIcon, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "./logic.js";
+import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileGlyph, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "./logic.js";
+
+// Static markup cannot call the SDK, so these marks are drawn here.
+document.getElementById("new-folder-btn").innerHTML = glyph("plus");
+document.querySelector("#files-grid .empty-icon").innerHTML = chickadee("nest", { size: 72 });
 
 // ── Globals ────────────────────────────────────────────────────────────────────
 const HUB_MEMBER = window.__CURRENT_MEMBER ?? null;
@@ -487,10 +491,10 @@ function renderSidebar() {
   } else {
     list.innerHTML = folders.map(f => `
       <div class="folder-item ${currentFolder?.name === f.name ? "active" : ""}" onclick="selectFolder('${esc(f.name)}')">
-        <span class="folder-icon">📁</span>
+        <span class="folder-icon">${glyph("folder")}</span>
         <span class="folder-name">${esc(f.name)}</span>
-        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">🔒</span>`
-          : (() => { const g = hubGroups.find(hg => hg.id === f.visibility); return g ? `<span class="folder-lock" title="Group: ${esc(g.name)}">👥</span>` : ""; })()}
+        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">${glyph("lock")}</span>`
+          : (() => { const g = hubGroups.find(hg => hg.id === f.visibility); return g ? `<span class="folder-lock" title="Group: ${esc(g.name)}">${glyph("people")}</span>` : ""; })()}
         <span class="folder-count">${f.doc_count ?? 0}</span>
       </div>`).join("");
   }
@@ -515,15 +519,15 @@ function renderMain() {
   if (!currentFolder) {
     title.textContent = "Family Documents";
     actions.innerHTML = "";
-    grid.innerHTML = `<div class="empty"><div class="empty-icon">📁</div><p>Select a folder to view documents</p></div>`;
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">${chickadee("nest", { size: 72 })}</div><p>Select a folder to view documents</p></div>`;
     return;
   }
 
   const _folderGroup = hubGroups.find(g => g.id === currentFolder.visibility);
   const lockBadge = currentFolder.visibility === "adults"
-    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">Adults only 🔒</span>`
+    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">Adults only ${glyph("lock")}</span>`
     : _folderGroup
-    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">👥 ${esc(_folderGroup.name)}</span>`
+    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">${glyph("people")} ${esc(_folderGroup.name)}</span>`
     : "";
   title.innerHTML = esc(currentFolder.name) + lockBadge;
 
@@ -549,7 +553,7 @@ function renderMain() {
       ondragover="event.preventDefault();this.classList.add('drag-over')"
       ondragleave="this.classList.remove('drag-over')"
       ondrop="handleDrop(event)">
-      <div class="drop-icon">📎</div>
+      <div class="drop-icon">${glyph("paperclip")}</div>
       <strong>Drop files here</strong> or <a href="#" onclick="event.preventDefault();triggerUpload()" style="color:var(--accent)">browse</a>
       <div style="margin-top:6px;font-size:.75rem;color:var(--muted)">
         PDF, images, Word, Excel, text · max ${formatBytes(window.__RESOURCE_LIMITS?.max_file_bytes ?? 10485760)}
@@ -571,10 +575,10 @@ function renderMain() {
   const cards = filtered.map(doc => {
     return `
       <div class="file-card" onclick="previewDoc('${doc.id}')">
-        ${CAN_WRITE ? `<button class="file-rename" onclick="event.stopPropagation();renameDoc('${doc.id}')" title="Rename">✏</button>` : ""}
-        ${CAN_WRITE ? `<button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete">✕</button>` : ""}
+        ${CAN_WRITE ? `<button class="file-rename" onclick="event.stopPropagation();renameDoc('${doc.id}')" title="Rename" aria-label="Rename">${glyph("pencil")}</button>` : ""}
+        ${CAN_WRITE ? `<button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete" aria-label="Delete">${glyph("close", { accent: "currentColor" })}</button>` : ""}
         ${CAN_WRITE && folders.length > 1 ? `<button class="file-move" onclick="event.stopPropagation();moveDoc('${doc.id}')" title="Move to folder">Move</button>` : ""}
-        <div class="file-thumb">${isPreviewableImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${fileIcon(doc.mimeType)}</span>`}</div>
+        <div class="file-thumb">${isPreviewableImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${glyph(fileGlyph(doc.mimeType))}</span>`}</div>
         <div class="file-name" title="${esc(doc.title)}">${esc(doc.title)}</div>
         <div class="file-meta">${formatBytes(doc.sizeBytes ?? 0)} · ${formatRelativeDate(doc.createdAt)}</div>
       </div>`;
@@ -786,7 +790,7 @@ async function openPreview(doc) {
       <div class="preview-header">
         <h3>${esc(doc.title)}</h3>
         <button id="preview-dl-btn" class="btn btn-ghost btn-sm" title="Download">↓ Download</button>
-        <button class="btn-icon" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+        <button class="btn-icon" aria-label="Close" onclick="this.closest('.modal-backdrop').remove()">${glyph("close")}</button>
       </div>
       <div class="preview-body" id="preview-body-inner">
         <div class="no-preview"><p style="color:#94a3b8">Loading…</p></div>
@@ -826,7 +830,7 @@ async function openPreview(doc) {
     await renderPdf(blobUrl, bodyEl);
   } else {
     bodyEl.innerHTML = `<div class="no-preview">
-      <div style="font-size:3rem;margin-bottom:12px">${fileIcon(doc.mimeType)}</div>
+      <div style="font-size:3rem;margin-bottom:12px">${glyph(fileGlyph(doc.mimeType))}</div>
       <p>No preview available</p>
     </div>`;
   }
@@ -850,8 +854,8 @@ window.openNewFolder = function() {
         <label>Visible to</label>
         <select id="new-folder-vis">
           <option value="everyone">Everyone</option>
-          <option value="adults">Adults only 🔒</option>
-          ${hubGroups.map(g => `<option value="${esc(g.id)}">👥 ${esc(g.name)}</option>`).join("")}
+          <option value="adults">Adults only</option>
+          ${hubGroups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("")}
         </select>
       </div>
       <div id="new-folder-err" style="display:none" class="error-msg"></div>
@@ -893,8 +897,8 @@ window.openRenameFolder = function() {
         <label>Visible to</label>
         <select id="rename-vis">
           <option value="everyone" ${f.visibility === "everyone" ? "selected" : ""}>Everyone</option>
-          <option value="adults"   ${f.visibility === "adults"   ? "selected" : ""}>Adults only 🔒</option>
-          ${hubGroups.map(g => `<option value="${esc(g.id)}" ${f.visibility === g.id ? "selected" : ""}>👥 ${esc(g.name)}</option>`).join("")}
+          <option value="adults"   ${f.visibility === "adults"   ? "selected" : ""}>Adults only</option>
+          ${hubGroups.map(g => `<option value="${esc(g.id)}" ${f.visibility === g.id ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
         </select>
       </div>
       <div class="modal-actions">

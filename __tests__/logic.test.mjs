@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ALLOWED_EXTENSIONS,
-  isImage, isPdf, fileIcon, formatBytes, accept,
+  isImage, isPdf, fileGlyph, formatBytes, accept,
   folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "../src/logic.js";
 
 // ── ALLOWED_EXTENSIONS ────────────────────────────────────────────────────────
@@ -11,11 +11,11 @@ describe("ALLOWED_EXTENSIONS", () => {
   it("does not include non-standard image/jpg", () => {
     expect(ALLOWED_EXTENSIONS["image/jpg"]).toBeUndefined();
   });
-  it("every entry has ext, label, and icon", () => {
+  it("every entry has ext, label, and glyph", () => {
     for (const [mime, entry] of Object.entries(ALLOWED_EXTENSIONS)) {
       expect(entry.ext,   `${mime} missing ext`).toBeTruthy();
       expect(entry.label, `${mime} missing label`).toBeTruthy();
-      expect(entry.icon,  `${mime} missing icon`).toBeTruthy();
+      expect(entry.glyph, `${mime} missing glyph`).toBeTruthy();
     }
   });
 });
@@ -37,13 +37,13 @@ describe("isPdf", () => {
   it("returns false for undefined",       () => expect(isPdf(undefined)).toBe(false));
 });
 
-// ── fileIcon ──────────────────────────────────────────────────────────────────
-describe("fileIcon", () => {
-  it("returns 🖼️ for image/jpeg",        () => expect(fileIcon("image/jpeg")).toBe("🖼️"));
-  it("returns 📄 for application/pdf",   () => expect(fileIcon("application/pdf")).toBe("📄"));
-  it("returns 📃 for text/plain",        () => expect(fileIcon("text/plain")).toBe("📃"));
-  it("returns 📎 for unknown mime type", () => expect(fileIcon("application/octet-stream")).toBe("📎"));
-  it("returns 📎 for undefined",         () => expect(fileIcon(undefined)).toBe("📎"));
+// ── fileGlyph ─────────────────────────────────────────────────────────────────
+describe("fileGlyph", () => {
+  it("returns frame for image/jpeg",          () => expect(fileGlyph("image/jpeg")).toBe("frame"));
+  it("returns document for application/pdf",  () => expect(fileGlyph("application/pdf")).toBe("document"));
+  it("returns note for text/plain",           () => expect(fileGlyph("text/plain")).toBe("note"));
+  it("returns document for unknown mime type", () => expect(fileGlyph("application/octet-stream")).toBe("document"));
+  it("returns document for undefined",        () => expect(fileGlyph(undefined)).toBe("document"));
 });
 
 // ── formatBytes ───────────────────────────────────────────────────────────────

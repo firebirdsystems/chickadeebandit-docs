@@ -2,19 +2,19 @@
 // This file exports docs-specific logic only.
 
 export const ALLOWED_EXTENSIONS = {
-  "image/jpeg":        { ext: "jpg",  label: "JPEG",  icon: "🖼️" },
-  "image/png":         { ext: "png",  label: "PNG",   icon: "🖼️" },
-  "image/heic":        { ext: "heic", label: "HEIC",  icon: "🖼️" },
-  "image/heif":        { ext: "heif", label: "HEIF",  icon: "🖼️" },
-  "image/webp":        { ext: "webp", label: "WebP",  icon: "🖼️" },
-  "image/gif":         { ext: "gif",  label: "GIF",   icon: "🖼️" },
-  "application/pdf":   { ext: "pdf",  label: "PDF",   icon: "📄" },
+  "image/jpeg":        { ext: "jpg",  label: "JPEG",  glyph: "frame" },
+  "image/png":         { ext: "png",  label: "PNG",   glyph: "frame" },
+  "image/heic":        { ext: "heic", label: "HEIC",  glyph: "frame" },
+  "image/heif":        { ext: "heif", label: "HEIF",  glyph: "frame" },
+  "image/webp":        { ext: "webp", label: "WebP",  glyph: "frame" },
+  "image/gif":         { ext: "gif",  label: "GIF",   glyph: "frame" },
+  "application/pdf":   { ext: "pdf",  label: "PDF",   glyph: "document" },
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                       { ext: "docx", label: "Word",  icon: "📝" },
+                       { ext: "docx", label: "Word",  glyph: "note" },
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-                       { ext: "xlsx", label: "Excel", icon: "📊" },
-  "text/plain":        { ext: "txt",  label: "Text",  icon: "📃" },
-  "text/markdown":     { ext: "md",   label: "Markdown", icon: "📃" },
+                       { ext: "xlsx", label: "Excel", glyph: "poll-bars" },
+  "text/plain":        { ext: "txt",  label: "Text",  glyph: "note" },
+  "text/markdown":     { ext: "md",   label: "Markdown", glyph: "note" },
 };
 
 export function isImage(mimeType) {
@@ -29,8 +29,9 @@ export function isPdf(mimeType) {
   return mimeType === "application/pdf";
 }
 
-export function fileIcon(mimeType) {
-  return ALLOWED_EXTENSIONS[mimeType]?.icon ?? "📎";
+/** The name of the hub glyph that marks a file type — drawn with the SDK's glyph(). */
+export function fileGlyph(mimeType) {
+  return ALLOWED_EXTENSIONS[mimeType]?.glyph ?? "document";
 }
 
 export function formatBytes(bytes) {
