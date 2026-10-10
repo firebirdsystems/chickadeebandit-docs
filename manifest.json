@@ -36,14 +36,33 @@
   ],
   "document_acls": {
     "write": {
+      "require_role": "adult",
       "roster_steward_only": true
     }
   },
   "file_acls": {
     "write": {
+      "require_role": "adult",
       "roster_steward_only": true
     },
     "read": "document_acl"
+  },
+  "store_acls": {
+    "folders_meta": {
+      "write": {
+        "require_role": "adult",
+        "roster_steward_only": true
+      }
+    },
+    "folders_private": {
+      "read": {
+        "require_role": "adult"
+      },
+      "write": {
+        "require_role": "adult",
+        "roster_steward_only": true
+      }
+    }
   },
   "nav": {
     "label": "Documents"

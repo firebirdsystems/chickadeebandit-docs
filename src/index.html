@@ -102,6 +102,11 @@
       padding: 2px 6px; font-size: 0.7rem; cursor: pointer; transition: opacity .15s;
     }
     .file-card:hover .file-del, .file-card:hover .file-rename, .file-card:hover .file-move { opacity: 1; }
+    /* Nothing hovers on a touch screen, so the controls would stay invisible
+       (and still tappable) there. */
+    @media (hover: none) {
+      .file-del, .file-rename, .file-move { opacity: 1; }
+    }
 
     /* ── Upload zone ── */
     .drop-zone {
@@ -238,7 +243,9 @@
 <script type="module">
 import { hubAlert, memberColor, initial, esc, isAdult, formatRelativeDate, hubConfirm, searchMatch, glyph, chickadee } from "/hub-sdk.js";
 import { createFilesHelper } from "/hub-sdk.js";
-import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileGlyph, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields } from "./logic.js";
+import { ALLOWED_EXTENSIONS, isImage, isPreviewableImage, isPdf, fileGlyph, formatBytes, accept, folderPathSafe, MAX_FOLDER_NAME_LENGTH, searchableFields,
+  DOCS_PAGE_LIMIT, fetchAllDocs, parseFoldersMeta, folderEntry, buildFolderList,
+  OPEN_FOLDERS_KEY, PRIVATE_FOLDERS_KEY, mergeFolderStores, planFolderWrites, planFolderMigration, visibilityKind, visibleFolders, folderNameTaken, resolveVisibility, canChangeDoc, folderListHtml } from "./logic.js";
 
 // Static markup cannot call the SDK, so these marks are drawn here.
 document.getElementById("new-folder-btn").innerHTML = glyph("plus");
@@ -252,9 +259,13 @@ const IS_ROSTER  = window.__SPACE_KIND === "roster";
 // Who may create folders, upload, rename, or delete. In a roster (classroom /
 // team / clients) only the steward — the space admin/teacher — writes; everyone
 // else is read-only. Elsewhere any adult may. The hub enforces this server-side
-// (document_acls / file_acls roster_steward_only); this flag only keeps
-// non-stewards from being shown controls that would 403.
+// (document_acls / file_acls / store_acls: require_role "adult" and
+// roster_steward_only); this flag only keeps everyone else from being shown
+// controls that would 403.
 const CAN_WRITE  = IS_ROSTER ? IS_ADMIN : IS_ADULT;
+// A document is changed only by its owner or an admin — the hub refuses anyone
+// else, so they are not offered the rename, move and delete controls.
+const mayChange = (doc) => canChangeDoc(doc, { canWrite: CAN_WRITE, isAdmin: IS_ADMIN, memberId: HUB_MEMBER?.id });
 
 const DOCS    = window.__DOCS_URL    ?? "";
 const STORE   = window.__STORE_URL   ?? "";
@@ -269,99 +280,212 @@ let storageInfo    = { totalBytes: 0, limit: 0 };
 let uploading      = false;
 let hubGroups      = [];   // HubMemberGroup[]
 let docSearch      = "";
+let filesLoading   = false; // the open folder's documents are still being read
+let filesError     = null;  // why they could not be read, when they could not
+let filesLoadSeq   = 0;     // newest loadFiles call; older answers are dropped
 
 // ── Docs API helpers ───────────────────────────────────────────────────────────
-async function docsGet(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${DOCS}${qs ? "?" + qs : ""}`);
-  return res.ok ? res.json() : [];
+/** The hub's own words for a refused request, or a fallback naming the status. */
+async function hubError(res, fallback) {
+  const err = await res.json().catch(() => ({}));
+  return typeof err?.error === "string" ? err.error : `${fallback} (${res.status})`;
+}
+// Every document matching `params`, read to the end of the list. Throws when a
+// page cannot be read: callers rename, re-share and delete on what this
+// returns, and "the read failed" must never look like "the folder is empty".
+function docsGetAll(params = {}) {
+  return fetchAllDocs(async (cursor) => {
+    const qs = new URLSearchParams({ ...params, limit: String(DOCS_PAGE_LIMIT) });
+    if (cursor) qs.set("cursor", cursor);
+    const res = await fetch(`${DOCS}?${qs}`);
+    if (!res.ok) throw new Error(await hubError(res, "Could not load documents"));
+    const more = res.headers.get("X-Documents-Has-More") === "true";
+    return { docs: await res.json(), nextCursor: more ? res.headers.get("X-Documents-Next-Cursor") : null };
+  });
 }
 async function docsCreate(body) {
   const res = await fetch(DOCS, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await hubError(res, "Could not save the document"));
   return res.json();
 }
-async function docsDelete(id) {
-  const res = await fetch(`${DOCS}/${id}`, { method: "DELETE" });
-  return res.ok;
+// Delete and patch answer { ok, error } and never throw, so a batch can count
+// its failures and a single action can say why it was refused.
+async function docsWrite(id, init, fallback) {
+  try {
+    const res = await fetch(`${DOCS}/${encodeURIComponent(id)}`, init);
+    if (res.ok) return { ok: true };
+    return {
+      ok: false,
+      error: res.status === 403
+        ? "Only the person who added a document, or an admin, can change it."
+        : await hubError(res, fallback),
+    };
+  } catch {
+    return { ok: false, error: `${fallback} — check your connection.` };
+  }
 }
-async function docsPatch(id, patch) {
-  const res = await fetch(`${DOCS}/${id}`, {
+function docsDelete(id) {
+  return docsWrite(id, { method: "DELETE" }, "Could not delete the document");
+}
+function docsPatch(id, patch) {
+  return docsWrite(id, {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
-  });
-  return res.ok;
+  }, "Could not update the document");
 }
 
-// Folder metadata stored in app KV as "folders_meta": { [name]: { visibility, createdBy } }
-async function getFoldersMeta() {
-  if (!STORE) return {};
-  const res = await fetch(`${STORE}?key=folders_meta`);
-  if (!res.ok) return {};
+// Folder metadata is kept in app KV as { [name]: { visibility, createdBy } },
+// under two keys (see OPEN_FOLDERS_KEY in logic.js): folders shared with
+// everyone in one anyone may read, every other folder in one the hub serves to
+// adults only.
+//
+// Both reads throw when they fail. Folder edits fall back to writing a whole
+// map for legacy names, and uploads take a folder's visibility from these — an
+// unread map taken for an empty one would wipe the first and open up the second.
+async function readFolderStore(key) {
+  const res = await fetch(`${STORE}?key=${encodeURIComponent(key)}`);
+  // Refused, not failed: the private records are not this person's to read,
+  // and there are none among the folders they are shown.
+  if (res.status === 403 && key === PRIVATE_FOLDERS_KEY) return parseFoldersMeta(null);
+  if (!res.ok) throw new Error(await hubError(res, "Could not load folders"));
   const { value } = await res.json();
-  return value ? JSON.parse(value) : {};
+  return parseFoldersMeta(value);
+}
+/** Both folder maps, apart: what a folder edit is planned against. */
+async function getFolderStores() {
+  if (!STORE) return { open: parseFoldersMeta(null), locked: parseFoldersMeta(null) };
+  const [open, locked] = await Promise.all([
+    readFolderStore(OPEN_FOLDERS_KEY),
+    // Not asked for by someone the hub would refuse.
+    IS_ADULT || IS_ADMIN ? readFolderStore(PRIVATE_FOLDERS_KEY) : parseFoldersMeta(null),
+  ]);
+  return { open, locked };
+}
+/** Every folder record this person may read, as one map. */
+async function getFoldersMeta() {
+  return mergeFolderStores(await getFolderStores());
 }
 /**
- * Applies targeted edits to the folders_meta blob through PATCH /api/store,
- * which serializes read-modify-write inside the usage Durable Object. The
- * previous whole-blob POST read the map, mutated it in the browser and wrote it
- * all back, so two adults renaming different folders at the same time silently
- * discarded one of the edits — and the delete path could resurrect a folder
- * another tab had just removed.
+ * Sends planned folder writes (planFolderWrites) in order, each through PATCH
+ * /api/store, which serializes read-modify-write inside the usage Durable
+ * Object. A whole-map POST read the map, changed it in the browser and wrote
+ * it all back, so two adults renaming different folders at the same time
+ * silently discarded one of the edits — and the delete path could resurrect a
+ * folder another tab had just removed.
  *
- * Falls back to the whole-blob write only for folder names that cannot be
+ * Falls back to the whole-map write only for folder names that cannot be
  * expressed as a path segment (legacy names containing a dot).
  */
-async function patchFoldersMeta(ops, fallbackMeta) {
-  if (!STORE) return true;
-  if (ops.every((op) => folderPathSafe(op.path.split(".")[0]))) {
-    const res = await fetch(STORE, { method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "folders_meta", ops }) });
-    if (res.ok) return true;
+async function sendFolderWrites(writes) {
+  if (!STORE) return;
+  for (const { key, ops, value } of writes) {
+    // The whole path is the folder name: a legacy "taxes.2026" must not pass
+    // on the strength of its first segment and be patched in as a nested object.
+    const patchable = ops.every((op) => folderPathSafe(op.path));
+    const res = await fetch(STORE, {
+      method: patchable ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patchable ? { key, ops } : { key, value: JSON.stringify(value) }),
+    });
     // A rejected patch is reported, not silently downgraded to the racy write.
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error ?? `Could not save folder settings (${res.status})`);
+    if (!res.ok) throw new Error(await hubError(res, "Could not save folder settings"));
   }
-  const res = await fetch(STORE, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: "folders_meta", value: JSON.stringify(fallbackMeta) }) });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error ?? `Could not save folder settings (${res.status})`);
+}
+/** Records `changes` ({ name, entry }, a null entry removing the folder). */
+async function saveFolders(stores, changes) {
+  await sendFolderWrites(planFolderWrites(stores, changes));
+}
+
+// Folders that are not for everyone were once all recorded in the open key.
+// The first person who may write moves them out; after that there is nothing
+// to move and this is one comparison. A failure is left for the next load:
+// nothing is lost by it, and the folders read the same from either key.
+async function migrateFolderStores(stores) {
+  if (!CAN_WRITE) return stores;
+  const writes = planFolderMigration(stores);
+  if (writes.length === 0) return stores;
+  try {
+    await sendFolderWrites(writes);
+    return await getFolderStores();
+  } catch {
+    return stores;
   }
-  return true;
 }
 
 // ── Data loading ───────────────────────────────────────────────────────────────
-async function loadFolders() {
-  const [allDocs, meta] = await Promise.all([docsGet(), getFoldersMeta()]);
-  const docs = Array.isArray(allDocs) ? allDocs : [];
+function readFolders() {
+  return Promise.all([
+    docsGetAll(),
+    getFolderStores().then(migrateFolderStores).then(mergeFolderStores),
+  ]);
+}
 
-  // Count docs per folder
-  const counts = {};
-  for (const d of docs) if (d.folder) counts[d.folder] = (counts[d.folder] ?? 0) + 1;
-
-  // Build folder list from metadata + any folders that exist only in docs
-  const folderSet = new Set([...Object.keys(meta), ...docs.map(d => d.folder).filter(Boolean)]);
-  const all = [...folderSet].map(name => ({
-    name,
-    visibility: meta[name]?.visibility ?? "everyone",
-    doc_count: counts[name] ?? 0,
-  })).sort((a, b) => a.name.localeCompare(b.name));
-
-  folders = all.filter(f => {
-    if (f.visibility === "everyone") return true;
-    if (f.visibility === "adults") return IS_ADULT;
-    const group = hubGroups.find(g => g.id === f.visibility);
-    return group ? group.memberIds.includes(HUB_MEMBER?.id) : IS_ADULT;
+async function loadFolders(reads = readFolders()) {
+  const [docs, meta] = await reads;
+  // Folder list from metadata + any folders that exist only in docs, counted,
+  // then narrowed to the ones this person is shown.
+  folders = visibleFolders(buildFolderList(docs, meta), {
+    isAdult: IS_ADULT, memberId: HUB_MEMBER?.id, groups: hubGroups,
   });
 }
 
+// Reads a folder's documents into view. Answers false, changing nothing, when
+// a newer read has started or the folder is no longer the open one — a slow
+// answer for the folder just left must not land under the next folder's title.
 async function loadFiles(folderName) {
-  const docs = await docsGet({ folder: folderName });
-  currentFiles = Array.isArray(docs) ? docs : [];
-  const info = await files.list();
+  const seq = ++filesLoadSeq;
+  const [docs, info] = await Promise.all([docsGetAll({ folder: folderName }), files.list()]);
+  if (seq !== filesLoadSeq || currentFolder?.name !== folderName) return false;
+  currentFiles = docs;
   storageInfo = info;
+  filesLoading = false;
+  filesError = null;
+  return true;
 }
 
-// ── Actions ────────────────────────────────────────────────────────────────────
+// Re-reads what is on screen after a change. A refresh that fails is said so
+// and leaves the last good state in view; it never empties the screen.
+async function refresh() {
+  try {
+    await Promise.all([currentFolder ? loadFiles(currentFolder.name) : null, loadFolders()]);
+  } catch (err) {
+    if (filesLoading) { filesLoading = false; filesError = err.message; }
+    await hubAlert("Could not refresh the document list.", { description: err.message });
+  }
+  renderSidebar();
+  renderMain();
+}
+
+// Opens `currentFolder`: the previous folder's cards go at once, so nothing of
+// it stays clickable under the new title while the new list is on its way.
+async function showCurrentFolder() {
+  const name = currentFolder?.name;
+  currentFiles = [];
+  filesError = null;
+  filesLoading = !!currentFolder;
+  renderSidebar();
+  renderMain();
+  if (!name) return;
+  try {
+    if (!await loadFiles(name)) return;
+  } catch (err) {
+    if (currentFolder?.name !== name) return;
+    filesLoading = false;
+    filesError = err.message ?? "Could not load documents";
+  }
+  renderSidebar();
+  renderMain();
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+// Documents in a folder that only someone else (their owner, or an admin) may
+// change. A folder rename, re-share or delete that would be refused for some of
+// them is not started at all, so it cannot leave the folder half done.
+function describeLocked(docs) {
+  const locked = docs.filter((d) => !mayChange(d));
+  if (locked.length === 0) return null;
+  return `${locked.length} ${locked.length === 1 ? "document here was" : "documents here were"} added by someone else: ${locked.map(d => d.title ?? d.id).join(", ")}. Only the person who added a document, or an admin, can change it.`;
+}
+
 async function createFolder(name, visibility) {
   const folder = name.trim();
   if (!folderPathSafe(folder)) {
@@ -371,27 +495,50 @@ async function createFolder(name, visibility) {
     return;
   }
   const entry = { visibility, createdBy: HUB_MEMBER?.id ?? "unknown", createdAt: new Date().toISOString() };
-  const meta = await getFoldersMeta();
-  meta[folder] = entry;
   try {
-    await patchFoldersMeta([{ op: "set", path: folder, value: entry }], meta);
+    const stores = await getFolderStores();
+    // Writing over an existing name would relabel that folder — a lock on
+    // documents still shared with everyone, or the reverse — without touching
+    // a single document in it.
+    if (folderNameTaken(folder, mergeFolderStores(stores), folders)) {
+      await hubAlert("A folder with that name already exists.", { description: "Choose another name, or open the existing folder." });
+      return;
+    }
+    await saveFolders(stores, [{ name: folder, entry }]);
   } catch (err) {
     await hubAlert("Could not create the folder.", { description: err.message });
     return;
   }
-  await loadFolders();
-  renderSidebar();
+  try {
+    await loadFolders();
+  } catch (err) {
+    await hubAlert("The folder was created, but the list could not be refreshed.", { description: err.message });
+    return;
+  }
   selectFolder(folder);
 }
 
 async function deleteFolder(name) {
   if (!await hubConfirm({ message: "Delete this folder?", description: "All documents inside will be permanently removed.", confirmLabel: "Delete folder", destructive: true })) return;
-  const docs = await docsGet({ folder: name });
+  let docs;
+  try {
+    docs = await docsGetAll({ folder: name });
+  } catch (err) {
+    // Not "no documents": removing the folder entry now would hide whatever
+    // is in it without deleting anything.
+    await hubAlert("Could not read the folder, so nothing was deleted.", { description: err.message });
+    return;
+  }
+  const locked = describeLocked(docs);
+  if (locked) {
+    await hubAlert("This folder can't be deleted by you.", { description: `${locked} Nothing was deleted.` });
+    return;
+  }
   // Deleting the record cascades to its stored file server-side, so a failed
   // request can no longer leave the bytes behind (they stay downloadable by id
   // and charged against the household's quota).
   const failed = (await Promise.all(
-    (Array.isArray(docs) ? docs : []).map(async (d) => (await docsDelete(d.id)) ? null : d),
+    docs.map(async (d) => (await docsDelete(d.id)).ok ? null : d),
   )).filter(Boolean);
   if (failed.length > 0) {
     // The folder entry stays: dropping it while documents remain would hide
@@ -400,62 +547,87 @@ async function deleteFolder(name) {
     await hubAlert(`${failed.length} ${failed.length === 1 ? "document" : "documents"} could not be deleted.`, {
       description: `The folder was left in place so nothing is orphaned: ${failed.map(d => d.title ?? d.id).join(", ")}. Try again.`,
     });
-    await loadFolders();
-    renderSidebar();
+    await refresh();
     return;
   }
-  const meta = await getFoldersMeta();
-  delete meta[name];
   try {
-    await patchFoldersMeta([{ op: "delete", path: name }], meta);
+    await saveFolders(await getFolderStores(), [{ name, entry: null }]);
   } catch (err) {
     await hubAlert("The documents were deleted, but the folder could not be removed.", { description: err.message });
   }
-  if (currentFolder?.name === name) { currentFolder = null; currentFiles = []; renderMain(); }
-  await loadFolders();
-  renderSidebar();
+  if (currentFolder?.name === name) { currentFolder = null; currentFiles = []; filesLoading = false; filesError = null; }
+  await refresh();
 }
 
 async function uploadFile(file) {
-  if (!currentFolder) return;
+  if (!currentFolder || !CAN_WRITE) return;
+  // One upload at a time, and the flag is taken before anything is awaited: a
+  // second upload started meanwhile would share the progress view, and the
+  // first to finish would clear it while the other was still sending.
+  if (uploading) {
+    hubAlert("Another upload is still in progress.", { description: "Wait for it to finish, then try again." });
+    return;
+  }
   uploading = true;
+  // Where the file goes is decided now. `currentFolder` follows the sidebar,
+  // and a click on another folder mid-upload must not re-file the document
+  // there — under that folder's visibility.
+  const folder = { name: currentFolder.name, visibility: currentFolder.visibility };
   renderMain();
 
+  // The stored file's id until a document names it. If anything fails in
+  // between, the bytes are removed again: nothing in this app lists a file
+  // without a document, so they would only count against the quota.
+  let unfiledId = null;
   try {
     let pct = 0;
-    const result = await files.upload(file, (e) => {
-      if (e.lengthComputable) {
-        pct = Math.round((e.loaded / e.total) * 100);
-        const bar = document.getElementById("upload-progress-bar");
-        if (bar) bar.style.width = `${pct}%`;
-        const label = document.getElementById("upload-progress-label");
-        if (label) label.textContent = `Uploading ${file.name}… ${pct}%`;
-      }
+    // A picture is stored with a small copy of itself, which the grid shows
+    // in place of the original. It belongs to the file: it is deleted with it
+    // and opens for the same people, so nothing here has to keep track of it.
+    const result = await files.upload(file, {
+      thumbnail: true,
+      onProgress: (e) => {
+        if (e.lengthComputable) {
+          pct = Math.round((e.loaded / e.total) * 100);
+          const bar = document.getElementById("upload-progress-bar");
+          if (bar) bar.style.width = `${pct}%`;
+          const label = document.getElementById("upload-progress-label");
+          if (label) label.textContent = `Uploading ${file.name}… ${pct}%`;
+        }
+      },
     });
+    unfiledId = result.id;
 
     // Register document in hub documents table. The folder's visibility maps
     // directly to the platform's sharedWith vocabulary: "everyone", "adults",
-    // or a group id — all enforced server-side at read time.
-    const sharedWith = [currentFolder.visibility];
+    // or a group id — all enforced server-side at read time. It is read again
+    // here, not taken from this tab's copy: another adult may have made the
+    // folder adults-only since this tab loaded it.
+    const visibility = resolveVisibility(await getFoldersMeta(), folder);
+    if (visibility === null) {
+      throw new Error(`"${folder.name}" was changed or removed by someone else, so the file was not added. Reopen the folder and try again.`);
+    }
+    const sharedWith = [visibility];
+    // The hub says what it stored, which is not always what was picked: a
+    // HEIC photo is kept as a JPEG, under another name, type and size.
     await docsCreate({
-      title: file.name,
+      title: result.name ?? file.name,
       category: "other",
       fileKey: result.id,
-      mimeType: file.type,
-      sizeBytes: file.size,
+      mimeType: result.mimeType ?? file.type,
+      sizeBytes: result.sizeBytes ?? file.size,
       sharedWith,
-      folder: currentFolder.name,
+      folder: folder.name,
     });
-
-    // Reload files and folder counts in parallel
-    await Promise.all([loadFiles(currentFolder.name), loadFolders()]);
-    renderSidebar();
+    unfiledId = null;
   } catch (err) {
+    if (unfiledId) await files.delete(unfiledId).catch(() => {});
     hubAlert(err.message ?? "Upload failed");
   } finally {
     uploading = false;
-    renderMain();
   }
+  // Reload files and folder counts
+  await refresh();
 }
 
 async function deleteDocument(doc) {
@@ -470,17 +642,16 @@ async function deleteDocument(doc) {
 
   // Deleting the record cascades to its stored file server-side; the client no
   // longer races a best-effort file delete whose failure nobody observed.
-  await docsDelete(doc.id);
-  await Promise.all([loadFiles(currentFolder.name), loadFolders()]);
-  renderSidebar();
-  renderMain();
+  const result = await docsDelete(doc.id);
+  // The re-read below puts the document back when the hub refused; say so,
+  // or it simply reappears.
+  if (!result.ok) await hubAlert(`"${doc.title}" could not be deleted.`, { description: result.error });
+  await refresh();
 }
 
 function selectFolder(name) {
   currentFolder = folders.find(f => f.name === name) ?? null;
-  if (currentFolder) loadFiles(currentFolder.name).then(renderMain);
-  renderSidebar();
-  renderMain();
+  return showCurrentFolder();
 }
 
 // ── Render sidebar ─────────────────────────────────────────────────────────────
@@ -489,14 +660,7 @@ function renderSidebar() {
   if (folders.length === 0) {
     list.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:.8rem">No folders yet</div>`;
   } else {
-    list.innerHTML = folders.map(f => `
-      <div class="folder-item ${currentFolder?.name === f.name ? "active" : ""}" onclick="selectFolder('${esc(f.name)}')">
-        <span class="folder-icon">${glyph("folder")}</span>
-        <span class="folder-name">${esc(f.name)}</span>
-        ${f.visibility === "adults" ? `<span class="folder-lock" title="Adults only">${glyph("lock")}</span>`
-          : (() => { const g = hubGroups.find(hg => hg.id === f.visibility); return g ? `<span class="folder-lock" title="Group: ${esc(g.name)}">${glyph("people")}</span>` : ""; })()}
-        <span class="folder-count">${f.doc_count ?? 0}</span>
-      </div>`).join("");
+    list.innerHTML = folderListHtml(folders, { currentName: currentFolder?.name, groups: hubGroups, esc, glyph });
   }
 
   // Storage bar
@@ -528,6 +692,10 @@ function renderMain() {
     ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">Adults only ${glyph("lock")}</span>`
     : _folderGroup
     ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px">${glyph("people")} ${esc(_folderGroup.name)}</span>`
+    // Shared with a group that is gone: only each document's owner (and an
+    // admin) can still read it, until the folder is given a new visibility.
+    : visibilityKind(currentFolder.visibility, hubGroups) === "missing"
+    ? `<span style="font-size:.72rem;padding:2px 8px;border-radius:20px;background:var(--amber-light);color:var(--amber);font-weight:700;margin-left:8px" title="Its documents can only be seen by whoever added them. Use Rename to choose who sees this folder.">Group removed ${glyph("lock")}</span>`
     : "";
   title.innerHTML = esc(currentFolder.name) + lockBadge;
 
@@ -536,7 +704,7 @@ function renderMain() {
       style="border:1.5px solid var(--border-mid);border-radius:8px;padding:5px 10px;font-size:0.82rem;font-family:inherit;background:var(--card);color:var(--text);width:150px" />
     ${CAN_WRITE ? `<button class="btn btn-ghost btn-sm" onclick="openRenameFolder()">Rename</button>` : ""}
     ${CAN_WRITE ? `<button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteFolderCurrent()">Delete folder</button>` : ""}
-    ${CAN_WRITE ? `<button class="btn btn-primary btn-sm" onclick="triggerUpload()">↑ Upload</button>` : ""}
+    ${CAN_WRITE ? `<button class="btn btn-primary btn-sm" onclick="triggerUpload()" ${uploading ? "disabled" : ""}>↑ Upload</button>` : ""}
   `;
 
   if (uploading) {
@@ -560,6 +728,20 @@ function renderMain() {
       </div>
     </div>` : "";
 
+  if (filesLoading) {
+    grid.innerHTML = `<div class="empty" style="padding:20px">Loading…</div>`;
+    return;
+  }
+
+  // A folder that could not be read is not shown as an empty one.
+  if (filesError) {
+    grid.innerHTML = `<div class="empty">
+      <p style="margin-bottom:12px">This folder could not be loaded. ${esc(filesError)}</p>
+      <button class="btn btn-ghost btn-sm" data-action="retry-folder">Try again</button>
+    </div>`;
+    return;
+  }
+
   const filtered = docSearch ? currentFiles.filter(d => searchMatch(docSearch, searchableFields(d))) : currentFiles;
 
   if (currentFiles.length === 0) {
@@ -572,13 +754,17 @@ function renderMain() {
     return;
   }
 
+  // Ids and file keys travel in data attributes and are read back by the
+  // grid's one click listener — nothing a document carries is written into script.
+  const canMove = folders.length > 1;
   const cards = filtered.map(doc => {
+    const own = mayChange(doc);
     return `
-      <div class="file-card" onclick="previewDoc('${doc.id}')">
-        ${CAN_WRITE ? `<button class="file-rename" onclick="event.stopPropagation();renameDoc('${doc.id}')" title="Rename" aria-label="Rename">${glyph("pencil")}</button>` : ""}
-        ${CAN_WRITE ? `<button class="file-del" onclick="event.stopPropagation();deleteDoc('${doc.id}')" title="Delete" aria-label="Delete">${glyph("close", { accent: "currentColor" })}</button>` : ""}
-        ${CAN_WRITE && folders.length > 1 ? `<button class="file-move" onclick="event.stopPropagation();moveDoc('${doc.id}')" title="Move to folder">Move</button>` : ""}
-        <div class="file-thumb">${isPreviewableImage(doc.mimeType) ? `<img src="${files.url(doc.fileKey)}" loading="lazy" />` : `<span>${glyph(fileGlyph(doc.mimeType))}</span>`}</div>
+      <div class="file-card" data-doc-id="${esc(doc.id)}">
+        ${own ? `<button class="file-rename" data-doc-action="rename" title="Rename" aria-label="Rename">${glyph("pencil")}</button>` : ""}
+        ${own ? `<button class="file-del" data-doc-action="delete" title="Delete" aria-label="Delete">${glyph("close", { accent: "currentColor" })}</button>` : ""}
+        ${own && canMove ? `<button class="file-move" data-doc-action="move" title="Move to folder">Move</button>` : ""}
+        <div class="file-thumb">${isPreviewableImage(doc.mimeType) && doc.fileKey ? `<img src="${esc(files.url(doc.thumbnailKey ?? doc.fileKey))}" loading="lazy" />` : `<span>${glyph(fileGlyph(doc.mimeType))}</span>`}</div>
         <div class="file-name" title="${esc(doc.title)}">${esc(doc.title)}</div>
         <div class="file-meta">${formatBytes(doc.sizeBytes ?? 0)} · ${formatRelativeDate(doc.createdAt)}</div>
       </div>`;
@@ -588,9 +774,35 @@ function renderMain() {
 }
 
 // ── Window actions ─────────────────────────────────────────────────────────────
-window.selectFolder = selectFolder;
+// One listener each for the folder list and the file grid. Their rows are
+// rebuilt on every render, and what a row stands for is read from its data
+// attributes rather than baked into an inline handler.
+document.getElementById("folder-list").addEventListener("click", (e) => {
+  if (e.target.closest("[data-action='retry-init']")) { init(); return; }
+  const item = e.target.closest("[data-folder]");
+  if (item) selectFolder(item.dataset.folder);
+});
 
-window.setDocSearch = function(v) { docSearch = v; renderMain(); };
+document.getElementById("files-grid").addEventListener("click", (e) => {
+  if (e.target.closest("[data-action='retry-folder']")) { showCurrentFolder(); return; }
+  const card = e.target.closest("[data-doc-id]");
+  if (!card) return;
+  const id = card.dataset.docId;
+  const action = e.target.closest("[data-doc-action]")?.dataset.docAction;
+  if (action === "rename") window.renameDoc(id);
+  else if (action === "delete") window.deleteDoc(id);
+  else if (action === "move") window.moveDoc(id);
+  else window.previewDoc(id);
+});
+
+window.setDocSearch = function(v) {
+  docSearch = v;
+  renderMain();
+  // renderMain rebuilds the header, search box included; typing carries on in
+  // the new one.
+  const box = document.querySelector("#header-actions input[type=search]");
+  if (box) { box.focus(); box.setSelectionRange(v.length, v.length); }
+};
 
 window.renameDoc = async function(id) {
   const doc = currentFiles.find(d => d.id === id);
@@ -628,13 +840,15 @@ window.renameDoc = async function(id) {
     el.remove();
     renderMain();
 
-    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: name }) })
-      .then(() => loadFiles(currentFolder.name).then(renderMain))
-      .catch(() => {
-        // Roll back on failure
-        if (localDoc) localDoc.title = prevTitle;
-        renderMain();
-      });
+    const result = await docsPatch(id, { title: name });
+    if (!result.ok) {
+      // Roll back on failure, and say so: a title that quietly reverts looks
+      // like a rename that worked until the next visit.
+      if (localDoc) localDoc.title = prevTitle;
+      renderMain();
+      await hubAlert("The file could not be renamed.", { description: result.error });
+    }
+    await refresh();
   });
 };
 
@@ -678,13 +892,21 @@ window.moveDoc = async function(id) {
     renderSidebar();
     renderMain();
 
-    // Carry the target folder's visibility onto the doc so access tracks the destination.
-    const movePatch = { folder: targetName };
-    if (dstFolder) movePatch.sharedWith = [dstFolder.visibility];
-    fetch(`${DOCS}/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(movePatch) })
-      .then(() => Promise.all([loadFiles(currentFolder.name), loadFolders()]))
-      .then(() => { renderSidebar(); renderMain(); })
-      .catch(() => Promise.all([loadFiles(currentFolder?.name), loadFolders()]).then(() => { renderSidebar(); renderMain(); }));
+    // Carry the target folder's visibility onto the doc so access tracks the
+    // destination — as the destination is NOW, read again rather than taken
+    // from this tab's copy, which another adult may have changed since.
+    let result;
+    try {
+      const visibility = resolveVisibility(await getFoldersMeta(), dstFolder ?? { name: targetName, visibility: null });
+      result = visibility === null
+        ? { ok: false, error: `"${targetName}" was changed or removed by someone else. Reopen it and try again.` }
+        : await docsPatch(id, { folder: targetName, sharedWith: [visibility] });
+    } catch (err) {
+      result = { ok: false, error: err.message };
+    }
+    // The re-read below undoes the optimistic move when the hub refused it.
+    if (!result.ok) await hubAlert(`"${doc.title}" could not be moved.`, { description: result.error });
+    await refresh();
   });
 };
 
@@ -757,7 +979,7 @@ async function renderPdf(blobUrl, container) {
       await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
     }));
   } catch (err) {
-    container.innerHTML = `<p style="color:#fca5a5;padding:20px">Failed to render PDF: ${err.message}</p>`;
+    container.innerHTML = `<p style="color:#fca5a5;padding:20px">Failed to render PDF: ${esc(err.message)}</p>`;
   }
 }
 
@@ -899,6 +1121,9 @@ window.openRenameFolder = function() {
           <option value="everyone" ${f.visibility === "everyone" ? "selected" : ""}>Everyone</option>
           <option value="adults"   ${f.visibility === "adults"   ? "selected" : ""}>Adults only</option>
           ${hubGroups.map(g => `<option value="${esc(g.id)}" ${f.visibility === g.id ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
+          ${/* Without its own option the select would fall to "Everyone", and
+               saving a mere rename would share the whole folder with everyone. */
+            visibilityKind(f.visibility, hubGroups) === "missing" ? `<option value="${esc(f.visibility)}" selected>A group that was removed</option>` : ""}
         </select>
       </div>
       <div class="modal-actions">
@@ -915,11 +1140,12 @@ window.submitRename = async function() {
   const name = document.getElementById("rename-input")?.value?.trim();
   const vis  = document.getElementById("rename-vis")?.value ?? "everyone";
   if (!name || !currentFolder) return;
+  const folder = currentFolder;
   const btn = document.querySelector('.modal-actions .btn-primary');
   const restoreButton = () => { if (btn) { btn.disabled = false; btn.textContent = "Save"; } };
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-  const nameChanged = name !== currentFolder.name;
-  const visChanged  = vis  !== currentFolder.visibility;
+  const nameChanged = name !== folder.name;
+  const visChanged  = vis  !== folder.visibility;
   if (nameChanged && !folderPathSafe(name)) {
     restoreButton();
     await hubAlert("That folder name can't be used.", {
@@ -927,7 +1153,32 @@ window.submitRename = async function() {
     });
     return;
   }
-  const meta = await getFoldersMeta();
+  // Both reads must succeed before anything is written. A read that failed
+  // is not an empty folder: taking it for one would record "adults only"
+  // having re-shared no document at all.
+  let stores, meta, docs = [];
+  try {
+    stores = await getFolderStores();
+    meta = mergeFolderStores(stores);
+    if (nameChanged || visChanged) docs = await docsGetAll({ folder: folder.name });
+  } catch (err) {
+    restoreButton();
+    await hubAlert("Could not read the folder, so nothing was changed.", { description: err.message });
+    return;
+  }
+  // Renaming onto an existing folder would pour these documents into it and
+  // put this folder's visibility label on documents that never had it.
+  if (nameChanged && folderNameTaken(name, meta, folders)) {
+    restoreButton();
+    await hubAlert("A folder with that name already exists.", { description: "Choose another name. To combine folders, move the files across instead." });
+    return;
+  }
+  const locked = describeLocked(docs);
+  if (locked) {
+    restoreButton();
+    await hubAlert("This folder can't be changed by you.", { description: `${locked} Nothing was changed.` });
+    return;
+  }
   // Re-sync the folder's docs when the name and/or visibility changes. A
   // visibility change must rewrite each doc's sharedWith so server-side access
   // tracks the folder (e.g. switching "everyone" → "adults"); a name change
@@ -938,42 +1189,44 @@ window.submitRename = async function() {
   // failure still recorded "adults only" — and the sidebar rendered the 🔒
   // badge from that intent while the documents it describes were still shared
   // with everyone. The badge now only ever reflects what the server accepted.
-  if (nameChanged || visChanged) {
-    const docs = await docsGet({ folder: currentFolder.name });
+  if (docs.length > 0) {
     const patch = {};
     if (nameChanged) patch.folder = name;
     if (visChanged)  patch.sharedWith = [vis];
-    const failed = (await Promise.all(
-      (Array.isArray(docs) ? docs : []).map(async (d) => (await docsPatch(d.id, patch)) ? null : d),
-    )).filter(Boolean);
+    const results = await Promise.all(docs.map(async (d) => ({ doc: d, ok: (await docsPatch(d.id, patch)).ok })));
+    const failed = results.filter(r => !r.ok).map(r => r.doc);
     if (failed.length > 0) {
+      // The documents that did change are put back as they were read, so the
+      // folder is not left split across two names or two audiences. What the
+      // person is told depends on whether that worked.
+      const undone = await Promise.all(results.filter(r => r.ok).map(
+        r => docsPatch(r.doc.id, { folder: r.doc.folder, sharedWith: r.doc.sharedWith ?? [] }),
+      ));
+      const titles = failed.map(d => d.title ?? d.id).join(", ");
       restoreButton();
       await hubAlert(`${failed.length} ${failed.length === 1 ? "document" : "documents"} could not be updated.`, {
-        description: `The folder was left unchanged so nothing claims a protection it doesn't have: ${failed.map(d => d.title ?? d.id).join(", ")}. Try again.`,
+        description: undone.every(r => r.ok)
+          ? `The folder was left as it was, so nothing claims a protection it doesn't have: ${titles}. Try again.`
+          : `Some documents were updated and others were not (${titles}), and the change could not be undone. Save again to finish it.`,
       });
-      await loadFolders();
-      renderSidebar();
-      renderMain();
+      await refresh();
       return;
     }
-    if (nameChanged) delete meta[currentFolder.name];
   }
-  const entry = { ...(meta[name] ?? {}), visibility: vis, createdBy: HUB_MEMBER?.id ?? "unknown" };
-  meta[name] = entry;
-  const ops = [{ op: "set", path: name, value: entry }];
-  if (nameChanged) ops.push({ op: "delete", path: currentFolder.name });
+  const previous = folderEntry(meta, folder.name) ?? {};
+  const entry = { ...previous, visibility: vis, createdBy: previous.createdBy ?? HUB_MEMBER?.id ?? "unknown" };
+  const changes = [{ name, entry }];
+  if (nameChanged) changes.push({ name: folder.name, entry: null });
   try {
-    await patchFoldersMeta(ops, meta);
+    await saveFolders(stores, changes);
   } catch (err) {
     restoreButton();
     await hubAlert("Could not save folder settings.", { description: err.message });
     return;
   }
   document.querySelector(".modal-backdrop")?.remove();
-  currentFolder = { ...currentFolder, name, visibility: vis };
-  await loadFolders();
-  renderSidebar();
-  renderMain();
+  if (currentFolder === folder) currentFolder = { ...folder, name, visibility: vis };
+  await refresh();
 };
 
 // ── File input handler ─────────────────────────────────────────────────────────
@@ -987,39 +1240,57 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
 async function handleDeepLink() {
   const fileId = new URLSearchParams(window.location.search).get("fileId");
   if (!fileId) return;
-  const allDocs = await docsGet();
-  const doc = (Array.isArray(allDocs) ? allDocs : []).find(d => d.id === fileId);
-  if (!doc) return;
+  // Asked for by id: the list is paged, and a linked document is as likely to
+  // be an old one as one of the newest.
+  const res = await fetch(`${DOCS}/${encodeURIComponent(fileId)}`).catch(() => null);
+  if (!res?.ok) return;
+  const doc = await res.json();
   if (doc.folder) {
-    await loadFiles(doc.folder);
     currentFolder = folders.find(f => f.name === doc.folder) ?? { name: doc.folder, visibility: "everyone" };
-    renderSidebar();
-    renderMain();
+    await showCurrentFolder();
   }
   openPreview(doc);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────────
-(async () => {
+async function init() {
+  const list = document.getElementById("folder-list");
   if (!DOCS) {
-    document.getElementById("folder-list").innerHTML =
+    list.innerHTML =
       `<div style="padding:16px;color:var(--red);font-size:.8rem">Documents not available</div>`;
     return;
   }
   // Read-only members (everyone but the steward in a roster) never see the
   // "new folder" control — writes would be rejected by the hub anyway.
   if (!CAN_WRITE) document.getElementById("new-folder-btn").style.display = "none";
-  const [info] = await Promise.all([
-    files.list(),
-    CONTEXT
-      ? fetch(`${CONTEXT}?keys=family.groups`).then(r => r.ok ? r.json() : {}).then(d => { hubGroups = d["family.groups"] ?? []; })
-      : Promise.resolve(),
-  ]);
-  storageInfo = info;
-  await loadFolders();
+  list.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:.8rem">Loading…</div>`;
+  // The folder reads start now and are only awaited below, after the groups
+  // are in: loadFolders filters by group membership, so it must not finish
+  // first, but it has no reason to start second.
+  const folderReads = readFolders();
+  folderReads.catch(() => {});
+  try {
+    const [info] = await Promise.all([
+      files.list(),
+      CONTEXT
+        ? fetch(`${CONTEXT}?keys=family.groups`).then(r => r.ok ? r.json() : {}).then(d => { hubGroups = d["family.groups"] ?? []; })
+        : Promise.resolve(),
+    ]);
+    storageInfo = info;
+    await loadFolders(folderReads);
+  } catch (err) {
+    // A first load that fails says so and offers another go, rather than
+    // sitting on "Loading…" for good.
+    list.innerHTML = `<div style="padding:16px;font-size:.8rem">
+      <p style="color:var(--red);margin-bottom:10px">Folders could not be loaded. ${esc(err?.message ?? "")}</p>
+      <button class="btn btn-ghost btn-sm" data-action="retry-init">Try again</button>
+    </div>`;
+    return;
+  }
   renderSidebar();
   handleDeepLink();
-})();
+}
+init();
 </script>
 </body>
 </html>
