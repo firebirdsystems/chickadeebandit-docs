@@ -288,10 +288,18 @@ let filesError     = null;  // why they could not be read, when they could not
 let filesLoadSeq   = 0;     // newest loadFiles call; older answers are dropped
 
 // ── Docs API helpers ───────────────────────────────────────────────────────────
-/** The hub's own words for a refused request, or a fallback naming the status. */
+// What a failed request is reported as. A refusal (a 4xx with words) is the hub
+// telling this person why, so those words are kept and marked `forUser`. Any
+// other failure is `fallback`, this app's own line; what the hub said goes to
+// the console and never to the page.
+function failText(e, line) { if (!e?.forUser) if (!e?.forUser) console.error(e); return e?.forUser ? e.message : line; }
+/** hubAlert's second argument: the reason, when there is one meant for the reader. */
+function reasonFor(e) { return e?.forUser ? { description: e.message } : (console.error(e), undefined); }
 async function hubError(res, fallback) {
   const err = await res.json().catch(() => ({}));
-  return typeof err?.error === "string" ? err.error : `${fallback} (${res.status})`;
+  if (res.status >= 400 && res.status < 500 && typeof err?.error === "string") return Object.assign(new Error(err.error), { forUser: true });
+  console.error(fallback, res.status, err?.error);
+  return new Error(fallback);
 }
 // Every document matching `params`, read to the end of the list. Throws when a
 // page cannot be read: callers rename, re-share and delete on what this
@@ -301,14 +309,14 @@ function docsGetAll(params = {}) {
     const qs = new URLSearchParams({ ...params, limit: String(DOCS_PAGE_LIMIT) });
     if (cursor) qs.set("cursor", cursor);
     const res = await fetch(`${DOCS}?${qs}`);
-    if (!res.ok) throw new Error(await hubError(res, "Could not load documents"));
+    if (!res.ok) throw await hubError(res, "Couldn’t load the documents.");
     const more = res.headers.get("X-Documents-Has-More") === "true";
     return { docs: await res.json(), nextCursor: more ? res.headers.get("X-Documents-Next-Cursor") : null };
   });
 }
 async function docsCreate(body) {
   const res = await fetch(DOCS, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(await hubError(res, "Could not save the document"));
+  if (!res.ok) throw await hubError(res, "Couldn’t save the document — try again.");
   return res.json();
 }
 // Delete and patch answer { ok, error } and never throw, so a batch can count
@@ -321,7 +329,7 @@ async function docsWrite(id, init, fallback) {
       ok: false,
       error: res.status === 403
         ? "Only the person who added a document, or an admin, can change it."
-        : await hubError(res, fallback),
+        : failText(await hubError(res, fallback), "Try again."),
     };
   } catch {
     return { ok: false, error: `${fallback} — check your connection.` };
@@ -349,7 +357,7 @@ async function readFolderStore(key) {
   // Refused, not failed: the private records are not this person's to read,
   // and there are none among the folders they are shown.
   if (res.status === 403 && key === PRIVATE_FOLDERS_KEY) return parseFoldersMeta(null);
-  if (!res.ok) throw new Error(await hubError(res, "Could not load folders"));
+  if (!res.ok) throw await hubError(res, "Couldn’t load the folders.");
   const { value } = await res.json();
   return parseFoldersMeta(value);
 }
@@ -390,7 +398,7 @@ async function sendFolderWrites(writes) {
       body: JSON.stringify(patchable ? { key, ops } : { key, value: JSON.stringify(value) }),
     });
     // A rejected patch is reported, not silently downgraded to the racy write.
-    if (!res.ok) throw new Error(await hubError(res, "Could not save folder settings"));
+    if (!res.ok) throw await hubError(res, "Couldn’t save the folder settings — try again.");
   }
 }
 /** Records `changes` ({ name, entry }, a null entry removing the folder). */
@@ -451,8 +459,8 @@ async function refresh() {
   try {
     await Promise.all([currentFolder ? loadFiles(currentFolder.name) : null, loadFolders()]);
   } catch (err) {
-    if (filesLoading) { filesLoading = false; filesError = err.message; }
-    await hubAlert("Could not refresh the document list.", { description: err.message });
+    if (filesLoading) { filesLoading = false; filesError = failText(err, "Try again."); }
+    await hubAlert("Could not refresh the document list.", reasonFor(err));
   }
   renderSidebar();
   renderMain();
@@ -473,7 +481,7 @@ async function showCurrentFolder() {
   } catch (err) {
     if (currentFolder?.name !== name) return;
     filesLoading = false;
-    filesError = err.message ?? "Could not load documents";
+    filesError = failText(err, "Try again.");
   }
   renderSidebar();
   renderMain();
@@ -489,36 +497,41 @@ function describeLocked(docs) {
   return `${locked.length} ${locked.length === 1 ? "document here was" : "documents here were"} added by someone else: ${locked.map(d => d.title ?? d.id).join(", ")}. Only the person who added a document, or an admin, can change it.`;
 }
 
+// Answers true once the folder exists, false when it was turned down with a
+// message of its own, and throws when the save itself failed — the New Folder
+// form stays open for the last two (see submitNewFolder).
 async function createFolder(name, visibility) {
   const folder = name.trim();
   if (!folderPathSafe(folder)) {
     await hubAlert("That folder name can't be used.", {
       description: `Folder names can't contain a dot and must be ${MAX_FOLDER_NAME_LENGTH} characters or fewer.`,
     });
-    return;
+    return false;
   }
   const entry = { visibility, createdBy: HUB_MEMBER?.id ?? "unknown", createdAt: new Date().toISOString() };
+  let stores;
   try {
-    const stores = await getFolderStores();
-    // Writing over an existing name would relabel that folder — a lock on
-    // documents still shared with everyone, or the reverse — without touching
-    // a single document in it.
-    if (folderNameTaken(folder, mergeFolderStores(stores), folders)) {
-      await hubAlert("A folder with that name already exists.", { description: "Choose another name, or open the existing folder." });
-      return;
-    }
-    await saveFolders(stores, [{ name: folder, entry }]);
+    stores = await getFolderStores();
   } catch (err) {
-    await hubAlert("Could not create the folder.", { description: err.message });
-    return;
+    await hubAlert("Could not create the folder.", reasonFor(err));
+    return false;
   }
+  // Writing over an existing name would relabel that folder — a lock on
+  // documents still shared with everyone, or the reverse — without touching
+  // a single document in it.
+  if (folderNameTaken(folder, mergeFolderStores(stores), folders)) {
+    await hubAlert("A folder with that name already exists.", { description: "Choose another name, or open the existing folder." });
+    return false;
+  }
+  await saveFolders(stores, [{ name: folder, entry }]);
   try {
     await loadFolders();
   } catch (err) {
-    await hubAlert("The folder was created, but the list could not be refreshed.", { description: err.message });
-    return;
+    await hubAlert("The folder was created, but the list could not be refreshed.", reasonFor(err));
+    return true;
   }
   selectFolder(folder);
+  return true;
 }
 
 async function deleteFolder(name) {
@@ -529,7 +542,7 @@ async function deleteFolder(name) {
   } catch (err) {
     // Not "no documents": removing the folder entry now would hide whatever
     // is in it without deleting anything.
-    await hubAlert("Could not read the folder, so nothing was deleted.", { description: err.message });
+    await hubAlert("Could not read the folder, so nothing was deleted.", reasonFor(err));
     return;
   }
   const locked = describeLocked(docs);
@@ -556,7 +569,7 @@ async function deleteFolder(name) {
   try {
     await saveFolders(await getFolderStores(), [{ name, entry: null }]);
   } catch (err) {
-    await hubAlert("The documents were deleted, but the folder could not be removed.", { description: err.message });
+    await hubAlert("The documents were deleted, but the folder could not be removed.", reasonFor(err));
   }
   if (currentFolder?.name === name) { currentFolder = null; currentFiles = []; filesLoading = false; filesError = null; }
   await refresh();
@@ -608,7 +621,7 @@ async function uploadFile(file) {
     // folder adults-only since this tab loaded it.
     const visibility = resolveVisibility(await getFoldersMeta(), folder);
     if (visibility === null) {
-      throw new Error(`"${folder.name}" was changed or removed by someone else, so the file was not added. Reopen the folder and try again.`);
+      throw Object.assign(new Error(`"${folder.name}" was changed or removed by someone else, so the file was not added. Reopen the folder and try again.`), { forUser: true });
     }
     const sharedWith = [visibility];
     // The hub says what it stored, which is not always what was picked: a
@@ -625,7 +638,10 @@ async function uploadFile(file) {
     unfiledId = null;
   } catch (err) {
     if (unfiledId) await files.delete(unfiledId).catch(() => {});
-    hubAlert(err.message ?? "Upload failed");
+    // An upload the hub refused (too large, wrong type, storage full) says why
+    // in the hub's words; any other failure is this app's one line.
+    const refused = (err?.status >= 400 && err?.status < 500) || err?.status === 507;
+    hubAlert(refused && err.message ? err.message : failText(err, "Couldn’t upload the file — try again."));
   } finally {
     uploading = false;
   }
@@ -819,6 +835,7 @@ window.renameDoc = async function(id) {
         <label>Name</label>
         <input id="rename-doc-input" type="text" value="${esc(doc.title)}" />
       </div>
+      <div id="rename-doc-err" style="display:none" class="error-msg" role="alert"></div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
         <button class="btn btn-primary" id="rename-doc-save-btn">Save</button>
@@ -835,22 +852,24 @@ window.renameDoc = async function(id) {
   document.getElementById("rename-doc-save-btn").addEventListener("click", async () => {
     const name = document.getElementById("rename-doc-input")?.value?.trim();
     if (!name) return;
+    const btn = document.getElementById("rename-doc-save-btn");
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = "Saving…";
 
-    // Optimistic: update title in local state and render immediately
+    // The form stays open until the hub has the new name: a refused rename
+    // says so here and leaves what was typed in place to send again.
+    const result = await docsPatch(id, { title: name });
+    btn.disabled = false; btn.textContent = "Save";
+    if (!result.ok) {
+      const err = document.getElementById("rename-doc-err");
+      err.textContent = `The file could not be renamed. ${result.error}`;
+      err.style.display = "block";
+      return;
+    }
     const localDoc = currentFiles.find(d => d.id === id);
-    const prevTitle = localDoc?.title;
     if (localDoc) localDoc.title = name;
     el.remove();
     renderMain();
-
-    const result = await docsPatch(id, { title: name });
-    if (!result.ok) {
-      // Roll back on failure, and say so: a title that quietly reverts looks
-      // like a rename that worked until the next visit.
-      if (localDoc) localDoc.title = prevTitle;
-      renderMain();
-      await hubAlert("The file could not be renamed.", { description: result.error });
-    }
     await refresh();
   });
 };
@@ -874,6 +893,7 @@ window.moveDoc = async function(id) {
           ${otherFolders.map(f => `<option value="${esc(f.name)}">${esc(f.name)}</option>`).join("")}
         </select>
       </div>
+      <div id="move-doc-err" style="display:none" class="error-msg" role="alert"></div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
         <button class="btn btn-primary" id="move-doc-save-btn">Move</button>
@@ -884,16 +904,10 @@ window.moveDoc = async function(id) {
   document.getElementById("move-doc-save-btn").addEventListener("click", async () => {
     const targetName = document.getElementById("move-folder-select")?.value;
     if (!targetName) return;
-
-    // Optimistic update: remove from current folder view
-    currentFiles = currentFiles.filter(d => d.id !== id);
-    const srcFolder = folders.find(f => f.name === currentFolder?.name);
-    if (srcFolder) srcFolder.doc_count = Math.max(0, (srcFolder.doc_count ?? 1) - 1);
+    const btn = document.getElementById("move-doc-save-btn");
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = "Moving…";
     const dstFolder = folders.find(f => f.name === targetName);
-    if (dstFolder) dstFolder.doc_count = (dstFolder.doc_count ?? 0) + 1;
-    el.remove();
-    renderSidebar();
-    renderMain();
 
     // Carry the target folder's visibility onto the doc so access tracks the
     // destination — as the destination is NOW, read again rather than taken
@@ -905,10 +919,17 @@ window.moveDoc = async function(id) {
         ? { ok: false, error: `"${targetName}" was changed or removed by someone else. Reopen it and try again.` }
         : await docsPatch(id, { folder: targetName, sharedWith: [visibility] });
     } catch (err) {
-      result = { ok: false, error: err.message };
+      result = { ok: false, error: failText(err, "Try again.") };
     }
-    // The re-read below undoes the optimistic move when the hub refused it.
-    if (!result.ok) await hubAlert(`"${doc.title}" could not be moved.`, { description: result.error });
+    btn.disabled = false; btn.textContent = "Move";
+    // A refused move says so in the form, which stays open on the chosen folder.
+    if (!result.ok) {
+      const err = document.getElementById("move-doc-err");
+      err.textContent = `"${doc.title}" could not be moved. ${result.error}`;
+      err.style.display = "block";
+      return;
+    }
+    el.remove();
     await refresh();
   });
 };
@@ -982,7 +1003,8 @@ async function renderPdf(blobUrl, container) {
       await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
     }));
   } catch (err) {
-    container.innerHTML = `<p style="color:#fca5a5;padding:20px">Failed to render PDF: ${esc(err.message)}</p>`;
+    console.error(err);
+    container.innerHTML = `<p style="color:#fca5a5;padding:20px">Couldn’t show this PDF.</p>`;
   }
 }
 
@@ -1083,7 +1105,7 @@ window.openNewFolder = function() {
           ${hubGroups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("")}
         </select>
       </div>
-      <div id="new-folder-err" style="display:none" class="error-msg"></div>
+      <div id="new-folder-err" style="display:none" class="error-msg" role="alert"></div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
         <button class="btn btn-primary" onclick="submitNewFolder()">Create</button>
@@ -1101,8 +1123,23 @@ window.submitNewFolder = async function() {
   const vis  = document.getElementById("new-folder-vis")?.value ?? "everyone";
   const err  = document.getElementById("new-folder-err");
   if (!name) { err.textContent = "Please enter a name."; err.style.display = "block"; return; }
-  document.querySelector(".modal-backdrop")?.remove();
-  await createFolder(name, vis);
+  // The form stays open until the folder exists: a refused save leaves the
+  // name in place to send again.
+  const modal = err.closest(".modal-backdrop");
+  const btn = modal?.querySelector(".modal-actions .btn-primary");
+  if (btn?.disabled) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
+  err.style.display = "none";
+  let created = false;
+  try {
+    created = await createFolder(name, vis);
+  } catch {
+    err.textContent = "Couldn’t create the folder — try again.";
+    err.style.display = "block";
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Create"; }
+  }
+  if (created) modal?.remove();
 };
 
 // ── Rename folder modal ────────────────────────────────────────────────────────
@@ -1166,7 +1203,7 @@ window.submitRename = async function() {
     if (nameChanged || visChanged) docs = await docsGetAll({ folder: folder.name });
   } catch (err) {
     restoreButton();
-    await hubAlert("Could not read the folder, so nothing was changed.", { description: err.message });
+    await hubAlert("Could not read the folder, so nothing was changed.", reasonFor(err));
     return;
   }
   // Renaming onto an existing folder would pour these documents into it and
@@ -1224,7 +1261,7 @@ window.submitRename = async function() {
     await saveFolders(stores, changes);
   } catch (err) {
     restoreButton();
-    await hubAlert("Could not save folder settings.", { description: err.message });
+    await hubAlert("Could not save folder settings.", reasonFor(err));
     return;
   }
   document.querySelector(".modal-backdrop")?.remove();
