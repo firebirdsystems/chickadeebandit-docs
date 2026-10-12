@@ -188,6 +188,9 @@
 
     /* ── Error ── */
     .error-msg { background: var(--red-light); color: var(--red); border-radius: 8px; padding: 9px 13px; font-size: 0.85rem; }
+    .load-error { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: var(--hub-tint-danger, #fee2e2); color: var(--hub-tint-danger-fg, #b91c1c); font-size: 0.9rem; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .load-error-retry { background: none; border: 1px solid currentColor; border-radius: 8px; padding: 5px 10px; font: inherit; font-weight: 600; color: inherit; cursor: pointer; flex-shrink: 0; }
+    .files-grid .load-error { grid-column: 1 / -1; }
 
     /* ── Storage bar ── */
     .storage-bar { padding: 10px 16px; border-top: 1px solid var(--border); font-size: 0.72rem; color: var(--muted); }
@@ -778,12 +781,12 @@ function renderMain() {
 // rebuilt on every render, and what a row stands for is read from its data
 // attributes rather than baked into an inline handler.
 document.getElementById("folder-list").addEventListener("click", (e) => {
-  if (e.target.closest("[data-action='retry-init']")) { init(); return; }
   const item = e.target.closest("[data-folder]");
   if (item) selectFolder(item.dataset.folder);
 });
 
 document.getElementById("files-grid").addEventListener("click", (e) => {
+  if (e.target.closest('[data-testid="load-retry"]')) { init(); return; }
   if (e.target.closest("[data-action='retry-folder']")) { showCurrentFolder(); return; }
   const card = e.target.closest("[data-doc-id]");
   if (!card) return;
@@ -1244,7 +1247,8 @@ async function handleDeepLink() {
   // be an old one as one of the newest.
   const res = await fetch(`${DOCS}/${encodeURIComponent(fileId)}`).catch(() => null);
   if (!res?.ok) return;
-  const doc = await res.json();
+  const doc = await res.json().catch(() => null);
+  if (!doc || typeof doc !== "object") return;
   if (doc.folder) {
     currentFolder = folders.find(f => f.name === doc.folder) ?? { name: doc.folder, visibility: "everyone" };
     await showCurrentFolder();
@@ -1253,6 +1257,9 @@ async function handleDeepLink() {
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────────
+// True from a failed first load until a load succeeds. While it is, no folder
+// list is shown and no folder can be made.
+let loadFailed = false;
 async function init() {
   const list = document.getElementById("folder-list");
   if (!DOCS) {
@@ -1262,7 +1269,7 @@ async function init() {
   }
   // Read-only members (everyone but the steward in a roster) never see the
   // "new folder" control — writes would be rejected by the hub anyway.
-  if (!CAN_WRITE) document.getElementById("new-folder-btn").style.display = "none";
+  document.getElementById("new-folder-btn").style.display = CAN_WRITE ? "" : "none";
   list.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:.8rem">Loading…</div>`;
   // The folder reads start now and are only awaited below, after the groups
   // are in: loadFolders filters by group membership, so it must not finish
@@ -1273,7 +1280,10 @@ async function init() {
     const [info] = await Promise.all([
       files.list(),
       CONTEXT
-        ? fetch(`${CONTEXT}?keys=family.groups`).then(r => r.ok ? r.json() : {}).then(d => { hubGroups = d["family.groups"] ?? []; })
+        // Groups that could not be read fail the load: an empty list would
+        // call every group folder's group "removed".
+        ? fetch(`${CONTEXT}?keys=family.groups`).then(r => r.ok ? r.json() : Promise.reject(new Error("Could not load the groups")))
+            .then(d => { if (!d || typeof d !== "object" || d.error || (Array.isArray(d.$errors) && d.$errors.includes("family.groups"))) throw new Error("Could not load the groups"); hubGroups = d["family.groups"] ?? []; })
         : Promise.resolve(),
     ]);
     storageInfo = info;
@@ -1281,12 +1291,13 @@ async function init() {
   } catch (err) {
     // A first load that fails says so and offers another go, rather than
     // sitting on "Loading…" for good.
-    list.innerHTML = `<div style="padding:16px;font-size:.8rem">
-      <p style="color:var(--red);margin-bottom:10px">Folders could not be loaded. ${esc(err?.message ?? "")}</p>
-      <button class="btn btn-ghost btn-sm" data-action="retry-init">Try again</button>
-    </div>`;
+    loadFailed = true;
+    list.innerHTML = "";
+    document.getElementById("new-folder-btn").style.display = "none";
+    document.getElementById("files-grid").innerHTML = `<div class="load-error" data-testid="load-error" role="alert"><span>Couldn’t load the folders.</span> <button type="button" class="load-error-retry" data-testid="load-retry">Try again</button></div>`;
     return;
   }
+  if (loadFailed) { loadFailed = false; renderMain(); }
   renderSidebar();
   handleDeepLink();
 }
