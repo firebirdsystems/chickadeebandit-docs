@@ -6,7 +6,7 @@ import {
   DOCS_PAGE_LIMIT, fetchAllDocs, parseFoldersMeta, folderEntry, buildFolderList,
   visibilityKind, visibleFolders, folderNameTaken, resolveVisibility, canChangeDoc,
   OPEN_FOLDERS_KEY, PRIVATE_FOLDERS_KEY, folderStoreKey, mergeFolderStores, planFolderWrites, planFolderMigration,
-  folderListHtml } from "../src/logic.js";
+  folderListHtml, outcomeUnknown, sameFile, docForFile } from "../src/logic.js";
 
 // ── ALLOWED_EXTENSIONS ────────────────────────────────────────────────────────
 describe("ALLOWED_EXTENSIONS", () => {
@@ -505,5 +505,36 @@ describe("folderListHtml", () => {
     expect(html).toContain('title="Group: The &quot;Board&quot;"');
     expect(html).toContain('title="Shared with a group that no longer exists"');
     expect(html.match(/folder-lock/g)).toHaveLength(3);
+  });
+});
+
+describe("outcomeUnknown", () => {
+  it("is unknown with no answer, a 400, or a 5xx other than 507", () => {
+    for (const status of [undefined, 0, 200, 400, 500, 502, 503]) expect(outcomeUnknown({ status })).toBe(true);
+    expect(outcomeUnknown(new Error("network"))).toBe(true);
+  });
+  it("is a known refusal for any other 4xx and for 507", () => {
+    for (const status of [403, 404, 409, 413, 415, 429, 507]) expect(outcomeUnknown({ status })).toBe(false);
+  });
+});
+
+describe("sameFile", () => {
+  const f = { name: "a.pdf", size: 10, type: "application/pdf", lastModified: 5 };
+  it("matches the same file picked again", () => expect(sameFile(f, { ...f })).toBe(true));
+  it("tells another file apart", () => {
+    expect(sameFile(f, { ...f, size: 11 })).toBe(false);
+    expect(sameFile(f, { ...f, name: "b.pdf" })).toBe(false);
+    expect(sameFile(f, { ...f, lastModified: 6 })).toBe(false);
+    expect(sameFile(null, f)).toBe(false);
+  });
+});
+
+describe("docForFile", () => {
+  it("finds the document naming the stored file", () => {
+    expect(docForFile([{ id: "d1", fileKey: "f1" }, { id: "d2", fileKey: "f2" }], "f2")?.id).toBe("d2");
+  });
+  it("is null when no document names it", () => {
+    expect(docForFile([{ id: "d1", fileKey: "f1" }], "f9")).toBeNull();
+    expect(docForFile(undefined, "f1")).toBeNull();
   });
 });
